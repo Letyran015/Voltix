@@ -18,6 +18,10 @@ public:
         p->drawLine(-40, 0, -20, 0);          // patte gauche
         p->drawLine(20, 0, 40, 0);            // patte droite
         p->drawRect(QRectF(-20, -6, 40, 12)); // corps
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(200, 0, 0));
+        p->drawEllipse(QPointF(-40, 0), 3, 3);   // broche gauche
+        p->drawEllipse(QPointF(40, 0), 3, 3);    // broche droite
     }
 
 protected:

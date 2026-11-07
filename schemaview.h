@@ -1,5 +1,8 @@
 #pragma once
 #include <QGraphicsView>
+#include <QPolygonF>
+
+class WireItem;
 
 class SchemaView : public QGraphicsView
 {
@@ -16,6 +19,14 @@ protected:
     void keyPressEvent(QKeyEvent *e) override;
 
 private:
+    void wireClick(const QPointF &scenePos);
+    void finishWire();
+    void setWireMode(bool on);
+
     bool m_panning = false;
     QPoint m_lastPos;
+
+    bool m_wireMode = false;
+    WireItem *m_current = nullptr;
+    QPolygonF m_pts;
 };
