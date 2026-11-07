@@ -3,6 +3,7 @@
 #include <QPainter>
 #include <QPainterPathStroker>
 #include <QPolygonF>
+#include "symbolitem.h"
 
 class WireItem : public QGraphicsItem
 {
@@ -10,7 +11,13 @@ public:
     WireItem()
     {
         setFlags(ItemIsSelectable);
-        setZValue(-1);   // les fils passent sous les composants
+        setZValue(-1);
+    }
+
+    ~WireItem() override
+    {
+        if (m_a.sym) m_a.sym->detach(this);
+        if (m_b.sym) m_b.sym->detach(this);
     }
 
     void setPoints(const QPolygonF &p)
@@ -18,13 +25,37 @@ public:
         prepareGeometryChange();
         m_pts = p;
     }
+    const QPolygonF &points() const { return m_pts; }
+
+    // accroche les extrémités à des broches (nullptr = extrémité libre)
+    void setEnds(SymbolItem *a, int pa, SymbolItem *b, int pb)
+    {
+        m_a = {a, pa};
+        m_b = {b, pb};
+        if (a) a->attach(this);
+        if (b) b->attach(this);
+    }
+
+    void detachSymbol(SymbolItem *s)
+    {
+        if (m_a.sym == s) m_a = {};
+        if (m_b.sym == s) m_b = {};
+    }
+
+    // replace les extrémités sur leurs broches, en gardant des segments orthogonaux
+    void syncEnds()
+    {
+        if (m_pts.size() < 2) return;
+        prepareGeometryChange();
+        if (m_a.sym) moveEnd(true,  m_a.sym->pinScene(m_a.pin));
+        if (m_b.sym) moveEnd(false, m_b.sym->pinScene(m_b.pin));
+    }
 
     QRectF boundingRect() const override
     {
         return m_pts.boundingRect().adjusted(-5, -5, 5, 5);
     }
 
-    // zone cliquable élargie pour sélectionner facilement un fil
     QPainterPath shape() const override
     {
         QPainterPath path;
@@ -41,5 +72,32 @@ public:
     }
 
 private:
+    struct End { SymbolItem *sym = nullptr; int pin = -1; };
+
+    void moveEnd(bool first, const QPointF &q)
+    {
+        const int n = m_pts.size();
+        if (n == 2) {
+            const QPointF other = first ? m_pts[1] : m_pts[0];
+            if (!qFuzzyCompare(q.x() + 1, other.x() + 1) && !qFuzzyCompare(q.y() + 1, other.y() + 1)) {
+                const QPointF corner(q.x(), other.y());     // crée un coude
+                QPolygonF np;
+                if (first) np << q << corner << other;
+                else       np << other << corner << q;
+                m_pts = np;
+            } else {
+                m_pts[first ? 0 : 1] = q;
+            }
+            return;
+        }
+        const int i = first ? 0 : n - 1;                    // le bout déplacé
+        const int j = first ? 1 : n - 2;                    // son voisin
+        const bool horizontal = qAbs(m_pts[i].y() - m_pts[j].y()) < 0.01;
+        if (horizontal) m_pts[j].setY(q.y());
+        else            m_pts[j].setX(q.x());
+        m_pts[i] = q;
+    }
+
     QPolygonF m_pts;
+    End m_a, m_b;
 };

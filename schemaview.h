@@ -3,6 +3,7 @@
 #include <QPolygonF>
 
 class WireItem;
+class SymbolItem;
 
 class SchemaView : public QGraphicsView
 {
@@ -20,8 +21,10 @@ protected:
 
 private:
     void wireClick(const QPointF &scenePos);
-    void finishWire();
+    void finishWire(bool keepLast = false);
     void setWireMode(bool on);
+    bool pinAt(const QPointF &p, SymbolItem *&sym, int &pin) const;
+    void dumpNets();
 
     bool m_panning = false;
     QPoint m_lastPos;
@@ -29,4 +32,6 @@ private:
     bool m_wireMode = false;
     WireItem *m_current = nullptr;
     QPolygonF m_pts;
+
+    int m_resCount = 0;
 };

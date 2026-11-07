@@ -1,13 +1,17 @@
 #include "schemaview.h"
 #include "symbolitem.h"
 #include "wireitem.h"
+#include "core.h"
 
+#include <QDebug>
 #include <QGraphicsScene>
 #include <QKeyEvent>
+#include <QMap>
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QWheelEvent>
 #include <QtMath>
+#include <algorithm>
 
 static const int GRID = 20;
 
@@ -16,7 +20,6 @@ static QPointF snap(const QPointF &p)
     return QPointF(qRound(p.x() / GRID) * GRID, qRound(p.y() / GRID) * GRID);
 }
 
-// force un segment horizontal ou vertical
 static QPointF ortho(const QPointF &from, const QPointF &to)
 {
     if (qAbs(to.x() - from.x()) >= qAbs(to.y() - from.y()))
@@ -59,6 +62,22 @@ void SchemaView::wheelEvent(QWheelEvent *e)
     scale(factor, factor);
 }
 
+bool SchemaView::pinAt(const QPointF &p, SymbolItem *&sym, int &pin) const
+{
+    for (QGraphicsItem *it : scene()->items()) {
+        auto *s = dynamic_cast<SymbolItem *>(it);
+        if (!s) continue;
+        for (int i = 0; i < s->pinCount(); ++i) {
+            if (QLineF(s->pinScene(i), p).length() < 4) {
+                sym = s;
+                pin = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void SchemaView::setWireMode(bool on)
 {
     finishWire();
@@ -81,6 +100,23 @@ void SchemaView::wireClick(const QPointF &scenePos)
     }
 
     const QPointF last = m_pts[m_pts.size() - 2];
+
+    SymbolItem *s = nullptr;
+    int pin = -1;
+    if (pinAt(p, s, pin)) {                 // clic sur une broche : on termine le fil
+        if (p == last)
+            return;
+        if (!qFuzzyCompare(p.x() + 1, last.x() + 1) && !qFuzzyCompare(p.y() + 1, last.y() + 1)) {
+            m_pts.last() = QPointF(p.x(), last.y());   // coude
+            m_pts << p;
+        } else {
+            m_pts.last() = p;
+        }
+        m_current->setPoints(m_pts);
+        finishWire(true);
+        return;
+    }
+
     const QPointF end = ortho(last, p);
     if (end == last)
         return;
@@ -89,16 +125,22 @@ void SchemaView::wireClick(const QPointF &scenePos)
     m_current->setPoints(m_pts);
 }
 
-void SchemaView::finishWire()
+void SchemaView::finishWire(bool keepLast)
 {
     if (!m_current)
         return;
-    m_pts.removeLast();                     // retire le segment d'aperçu
+    if (!keepLast)
+        m_pts.removeLast();                 // retire le segment d'aperçu
+
     if (m_pts.size() < 2) {
-        scene()->removeItem(m_current);
         delete m_current;
     } else {
+        SymbolItem *sa = nullptr, *sb = nullptr;
+        int pa = -1, pb = -1;
+        pinAt(m_pts.first(), sa, pa);       // accroche aux broches trouvées aux extrémités
+        pinAt(m_pts.last(), sb, pb);
         m_current->setPoints(m_pts);
+        m_current->setEnds(sa, pa, sb, pb);
     }
     m_current = nullptr;
     m_pts.clear();
@@ -132,7 +174,7 @@ void SchemaView::mouseMoveEvent(QMouseEvent *e)
         verticalScrollBar()->setValue(verticalScrollBar()->value() - d.y());
         return;
     }
-    if (m_wireMode && m_current) {          // aperçu du segment en cours
+    if (m_wireMode && m_current) {
         const QPointF p = snap(mapToScene(e->position().toPoint()));
         m_pts.last() = ortho(m_pts[m_pts.size() - 2], p);
         m_current->setPoints(m_pts);
@@ -156,13 +198,15 @@ void SchemaView::mouseReleaseEvent(QMouseEvent *e)
 void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
 {
     const QPoint pos = e->position().toPoint();
-    if (m_wireMode) {                       // un double-clic rapide compte comme un clic
+    if (m_wireMode) {
         if (e->button() == Qt::LeftButton)
             wireClick(mapToScene(pos));
         return;
     }
     if (e->button() == Qt::LeftButton && !itemAt(pos)) {
         auto *r = new ResistorItem;
+        r->index = ++m_resCount;
+        r->ref = QString("R%1").arg(m_resCount);
         r->setPos(snap(mapToScene(pos)));
         scene()->addItem(r);
         return;
@@ -170,21 +214,73 @@ void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
     QGraphicsView::mouseDoubleClickEvent(e);
 }
 
+void SchemaView::dumpNets()
+{
+    QList<SymbolItem *> syms;
+    QList<WireItem *> wires;
+    for (QGraphicsItem *it : scene()->items()) {
+        if (auto *s = dynamic_cast<SymbolItem *>(it)) syms << s;
+        else if (auto *w = dynamic_cast<WireItem *>(it)) wires << w;
+    }
+    std::sort(syms.begin(), syms.end(),
+              [](SymbolItem *a, SymbolItem *b) { return a->index < b->index; });
+
+    // 1. on construit le modèle C à partir de la scène
+    Schema *sc = schema_new();
+    for (int c = 0; c < syms.size(); ++c) {
+        for (int i = 0; i < syms[c]->pinCount(); ++i) {
+            const QPointF p = syms[c]->pinScene(i);
+            schema_add_pin(sc, c, i, qRound(p.x()), qRound(p.y()));
+        }
+    }
+    for (WireItem *w : wires) {
+        const QPolygonF &pts = w->points();
+        if (pts.size() < 2) continue;
+        schema_add_wire(sc, qRound(pts.first().x()), qRound(pts.first().y()),
+                        qRound(pts.last().x()),  qRound(pts.last().y()));
+    }
+
+    // 2. le noyau calcule les nets
+    schema_compute_nets(sc);
+
+    // 3. on affiche le résultat
+    QMap<int, QStringList> nets;
+    QStringList floating;
+    for (int c = 0; c < syms.size(); ++c) {
+        for (int i = 0; i < syms[c]->pinCount(); ++i) {
+            const QString name = QString("%1.%2").arg(syms[c]->ref).arg(i + 1);
+            const int n = schema_pin_net(sc, c, i);
+            if (n >= 0) nets[n] << name;
+            else        floating << name;
+        }
+    }
+    qDebug().noquote() << "--- Netlist :" << nets.size() << "net(s) ---";
+    for (auto it = nets.cbegin(); it != nets.cend(); ++it)
+        qDebug().noquote() << QString("Net %1 : %2").arg(it.key()).arg(it.value().join(", "));
+    if (!floating.isEmpty())
+        qDebug().noquote() << "Non connectées :" << floating.join(", ");
+
+    schema_free(sc);
+}
+
 void SchemaView::keyPressEvent(QKeyEvent *e)
 {
-    if (e->key() == Qt::Key_W) {                        // outil fil : on/off
+    if (e->key() == Qt::Key_W) {
         setWireMode(!m_wireMode);
+    } else if (e->key() == Qt::Key_N) {
+        dumpNets();
     } else if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Return) {
-        finishWire();                                   // termine le fil en cours
-    } else if (e->key() == Qt::Key_R) {                 // rotation de 90°
-        for (QGraphicsItem *it : scene()->selectedItems())
+        finishWire();
+    } else if (e->key() == Qt::Key_R) {
+        for (QGraphicsItem *it : scene()->selectedItems()) {
             it->setRotation(it->rotation() + 90);
-    } else if (e->key() == Qt::Key_Delete) {            // suppression
-        const auto items = scene()->selectedItems();
-        for (QGraphicsItem *it : items) {
-            scene()->removeItem(it);
-            delete it;
+            if (auto *s = dynamic_cast<SymbolItem *>(it))
+                s->updateWires();
         }
+    } else if (e->key() == Qt::Key_Delete) {
+        const auto items = scene()->selectedItems();
+        for (QGraphicsItem *it : items)
+            delete it;
     } else {
         QGraphicsView::keyPressEvent(e);
     }
