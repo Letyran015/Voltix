@@ -13,6 +13,9 @@ qt_add_executable(Voltix
     mainwindow.ui
     core.h
     core.c
+    symbolitem.h
+    schemaview.h
+    schemaview.cpp
 )
 
 qt_add_translations(

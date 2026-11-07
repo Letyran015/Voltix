@@ -2,13 +2,15 @@
 #include "ui_mainwindow.h"
 #include "core.h"
 #include <QDebug>
+#include "schemaview.h"
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
-    qDebug() << "core_add(2, 3) =" << core_add(2, 3);
+    setCentralWidget(new SchemaView(this));
+    setWindowTitle("Voltix");
 }
 
 MainWindow::~MainWindow()
