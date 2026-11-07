@@ -12,6 +12,7 @@
 #include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
+#include <QMessageBox>
 
 static const int GRID = 20;
 
@@ -46,11 +47,13 @@ void SchemaView::drawBackground(QPainter *p, const QRectF &rect)
         return;
 
     p->setPen(QPen(QColor(170, 170, 170), 0));
-    const qreal left = qFloor(rect.left() / GRID) * GRID;
-    const qreal top  = qFloor(rect.top()  / GRID) * GRID;
-    for (qreal x = left; x < rect.right(); x += GRID)
-        for (qreal y = top; y < rect.bottom(); y += GRID)
-            p->drawPoint(QPointF(x, y));
+    const int x0 = qFloor(rect.left() / GRID);
+    const int x1 = qCeil(rect.right() / GRID);
+    const int y0 = qFloor(rect.top() / GRID);
+    const int y1 = qCeil(rect.bottom() / GRID);
+    for (int ix = x0; ix <= x1; ++ix)
+        for (int iy = y0; iy <= y1; ++iy)
+            p->drawPoint(QPointF(ix * GRID, iy * GRID));
 }
 
 void SchemaView::wheelEvent(QWheelEvent *e)
@@ -204,11 +207,13 @@ void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
         return;
     }
     if (e->button() == Qt::LeftButton && !itemAt(pos)) {
-        auto *r = new ResistorItem;
-        r->index = ++m_resCount;
-        r->ref = QString("R%1").arg(m_resCount);
-        r->setPos(snap(mapToScene(pos)));
-        scene()->addItem(r);
+        SymbolItem *s = makeSymbol(m_kind);
+        if (s) {
+            s->index = ++m_total;
+            s->ref = s->prefix() + QString::number(++m_counts[s->prefix()]);
+            s->setPos(snap(mapToScene(pos)));
+            scene()->addItem(s);
+        }
         return;
     }
     QGraphicsView::mouseDoubleClickEvent(e);
@@ -233,7 +238,7 @@ void SchemaView::dumpNets()
             schema_add_pin(sc, c, i, qRound(p.x()), qRound(p.y()));
         }
     }
-    for (WireItem *w : wires) {
+    for (WireItem *w : std::as_const(wires)) {
         const QPolygonF &pts = w->points();
         if (pts.size() < 2) continue;
         schema_add_wire(sc, qRound(pts.first().x()), qRound(pts.first().y()),
@@ -254,12 +259,19 @@ void SchemaView::dumpNets()
             else        floating << name;
         }
     }
-    qDebug().noquote() << "--- Netlist :" << nets.size() << "net(s) ---";
-    for (auto it = nets.cbegin(); it != nets.cend(); ++it)
-        qDebug().noquote() << QString("Net %1 : %2").arg(it.key()).arg(it.value().join(", "));
+    QString text = QString("%1 net(s)\n\n").arg(nets.size());
+    for (auto it = nets.cbegin(); it != nets.cend(); ++it) {
+        const bool gnd = !it.value().filter("GND").isEmpty();
+        text += QString("Net %1%2 : %3\n")
+                    .arg(it.key())
+                    .arg(gnd ? " (masse)" : "")
+                    .arg(it.value().join(", "));
+    }
     if (!floating.isEmpty())
-        qDebug().noquote() << "Non connectées :" << floating.join(", ");
+        text += QString("\nNon connectées : %1").arg(floating.join(", "));
 
+    qDebug().noquote() << text;
+    QMessageBox::information(this, "Netlist", text);
     schema_free(sc);
 }
 

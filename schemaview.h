@@ -1,6 +1,8 @@
 #pragma once
 #include <QGraphicsView>
 #include <QPolygonF>
+#include <QMap>
+#include <QString>
 
 class WireItem;
 class SymbolItem;
@@ -9,6 +11,7 @@ class SchemaView : public QGraphicsView
 {
 public:
     explicit SchemaView(QWidget *parent = nullptr);
+        void setKind(const QString &kind) { m_kind = kind; }
 
 protected:
     void drawBackground(QPainter *p, const QRectF &rect) override;
@@ -33,5 +36,7 @@ private:
     WireItem *m_current = nullptr;
     QPolygonF m_pts;
 
-    int m_resCount = 0;
+    QString m_kind = "resistor";
+    int m_total = 0;
+    QMap<QString, int> m_counts;
 };
