@@ -2,7 +2,9 @@
 #include "ui_mainwindow.h"
 #include "schemaview.h"
 
+#include <QAction>
 #include <QActionGroup>
+#include <QCloseEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeySequence>
@@ -21,7 +23,6 @@ MainWindow::MainWindow(QWidget *parent)
     auto *view = new SchemaView(this);
     m_view = view;
     setCentralWidget(view);
-    updateTitle();
 
     // Barre d'outils : choix du composant posé au double-clic
     auto *tb = addToolBar("Composants");
@@ -50,12 +51,24 @@ MainWindow::MainWindow(QWidget *parent)
     fm->addAction("&Enregistrer", QKeySequence::Save, this, &MainWindow::saveFile);
     fm->addAction("Enregistrer &sous…", QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
 
+    // Menu Édition
+    QMenu *em = menuBar()->addMenu("&Édition");
+    m_undoAct = em->addAction("&Annuler", QKeySequence::Undo, this, [view] { view->undo(); });
+    m_redoAct = em->addAction("&Rétablir", QKeySequence::Redo, this, [view] { view->redo(); });
+
     // Menu Simulation
     QMenu *sm = menuBar()->addMenu("&Simulation");
     sm->addAction("Point de fonctionnement &DC", QKeySequence(Qt::Key_F5), this,
                   [view] { view->simulateDC(); });
     sm->addAction("&Transitoire…", QKeySequence(Qt::Key_F6), this,
                   [view] { view->simulateTran(); });
+    sm->addAction("&Balayage DC…", QKeySequence(Qt::Key_F7), this,
+                  [view] { view->simulateSweep(); });
+    sm->addAction("Analyse &AC (Bode)…", QKeySequence(Qt::Key_F8), this,
+                  [view] { view->simulateAC(); });
+
+    connect(view, &SchemaView::stateChanged, this, &MainWindow::updateState);
+    updateState();
 }
 
 MainWindow::~MainWindow()
@@ -63,21 +76,47 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
-void MainWindow::updateTitle()
+void MainWindow::updateState()
 {
     const QString name = m_path.isEmpty() ? QString("Sans titre") : QFileInfo(m_path).fileName();
-    setWindowTitle("Voltix - " + name);
+    setWindowTitle(QString("Voltix - %1%2").arg(name, m_view->isModified() ? " *" : ""));
+    m_undoAct->setEnabled(m_view->canUndo());
+    m_redoAct->setEnabled(m_view->canRedo());
+}
+
+bool MainWindow::maybeSave()
+{
+    if (!m_view->isModified())
+        return true;
+    const auto r = QMessageBox::question(
+        this, "Voltix", "Le schéma a été modifié. Voulez-vous l'enregistrer ?",
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (r == QMessageBox::Save)
+        return saveFile();
+    return r == QMessageBox::Discard;
+}
+
+void MainWindow::closeEvent(QCloseEvent *e)
+{
+    if (maybeSave())
+        e->accept();
+    else
+        e->ignore();
 }
 
 void MainWindow::newFile()
 {
+    if (!maybeSave())
+        return;
     m_view->clearAll();
     m_path.clear();
-    updateTitle();
+    updateState();
 }
 
 void MainWindow::openFile()
 {
+    if (!maybeSave())
+        return;
     const QString p = QFileDialog::getOpenFileName(this, "Ouvrir un schéma", QString(),
                                                    "Schéma Voltix (*.voltix)");
     if (p.isEmpty())
@@ -87,7 +126,7 @@ void MainWindow::openFile()
         return;
     }
     m_path = p;
-    updateTitle();
+    updateState();
 }
 
 bool MainWindow::saveFile()
@@ -98,6 +137,7 @@ bool MainWindow::saveFile()
         QMessageBox::warning(this, "Voltix", "Impossible d'écrire le fichier.");
         return false;
     }
+    updateState();
     return true;
 }
 
@@ -109,7 +149,12 @@ bool MainWindow::saveFileAs()
         return false;
     if (!p.endsWith(".voltix"))
         p += ".voltix";
+    const QString old = m_path;
     m_path = p;
-    updateTitle();
-    return saveFile();
+    if (!saveFile()) {
+        m_path = old;
+        updateState();
+        return false;
+    }
+    return true;
 }

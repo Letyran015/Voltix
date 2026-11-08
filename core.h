@@ -13,8 +13,10 @@ void    schema_free(Schema *s);
 /* Une broche : numéro de composant, numéro de broche, position (grille) */
 void schema_add_pin(Schema *s, int comp, int pin, int x, int y);
 
-/* Un fil : ses deux extrémités */
-void schema_add_wire(Schema *s, int x1, int y1, int x2, int y2);
+/* Un fil : polyligne xy = x0,y0,x1,y1,... (npts points).
+   Ses deux extrémités sont au même potentiel. Une extrémité posée sur
+   un autre fil ou une broche est reliée à celui-ci (jonction en T). */
+void schema_add_wire(Schema *s, const int *xy, int npts);
 
 /* Calcule les nets. Retourne le nombre de nets. */
 int  schema_compute_nets(Schema *s);

@@ -1,5 +1,6 @@
 #pragma once
 #include <QGraphicsItem>
+#include <QLineF>
 #include <QPainter>
 #include <QPainterPathStroker>
 #include <QPolygonF>
@@ -31,6 +32,23 @@ public:
         m_pts = p;
     }
     const QPolygonF &points() const { return m_pts; }
+
+    // le point p est-il sur ce fil ?
+    bool touches(const QPointF &p, qreal tol = 0.6) const
+    {
+        for (int i = 0; i + 1 < m_pts.size(); ++i) {
+            const QPointF a = m_pts[i], b = m_pts[i + 1];
+            const QPointF d = b - a;
+            const qreal l2 = d.x() * d.x() + d.y() * d.y();
+            qreal t = 0;
+            if (l2 > 1e-9)
+                t = qBound(0.0, ((p.x() - a.x()) * d.x() + (p.y() - a.y()) * d.y()) / l2, 1.0);
+            const QPointF q = a + t * d;
+            if (QLineF(p, q).length() <= tol)
+                return true;
+        }
+        return false;
+    }
 
     // accroche les extrémités à des broches (nullptr = extrémité libre)
     void setEnds(SymbolItem *a, int pa, SymbolItem *b, int pb)
@@ -95,8 +113,8 @@ private:
             }
             return;
         }
-        const int i = first ? 0 : n - 1;                    // le bout déplacé
-        const int j = first ? 1 : n - 2;                    // son voisin
+        const int i = first ? 0 : n - 1;
+        const int j = first ? 1 : n - 2;
         const bool horizontal = qAbs(m_pts[i].y() - m_pts[j].y()) < 0.01;
         if (horizontal) m_pts[j].setY(q.y());
         else            m_pts[j].setX(q.x());

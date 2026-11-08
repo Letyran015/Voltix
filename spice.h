@@ -6,13 +6,17 @@
 #include <QMap>
 #include <QRegularExpression>
 #include <QStringList>
+#include <QVector>
 #include <algorithm>
 
 struct SpiceResult {
     QString netlist;
-    QString body;         // netlist sans section .control
-    QString legend;       // correspondance nœud -> broches
-    QStringList nodes;    // nœuds SPICE hors masse
+    QString body;           // netlist sans section .control
+    QString legend;         // correspondance nœud -> broches
+    QStringList nodes;      // nœuds SPICE hors masse
+    QStringList dcRefs;     // sources DC (noms affichés)
+    QStringList dcNames;    // sources DC (noms SPICE)
+    bool hasAc = false;     // au moins une source sinus avec AC 1
     QString error;
 };
 
@@ -28,14 +32,9 @@ inline QString spiceValue(const SymbolItem *s, const QString &name, const QStrin
     return def;
 }
 
-inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<WireItem *> &wires)
+// modèle C du schéma ; syms doit être trié par index
+inline Schema *buildSchema(const QList<SymbolItem *> &syms, const QList<WireItem *> &wires)
 {
-    SpiceResult r;
-    QList<SymbolItem *> syms = symsIn;
-    std::sort(syms.begin(), syms.end(),
-              [](SymbolItem *a, SymbolItem *b) { return a->index < b->index; });
-
-    // 1. modèle C et calcul des nets
     Schema *sc = schema_new();
     for (int c = 0; c < syms.size(); ++c)
         for (int i = 0; i < syms[c]->pinCount(); ++i) {
@@ -45,12 +44,26 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
     for (WireItem *w : wires) {
         const QPolygonF &pts = w->points();
         if (pts.size() < 2) continue;
-        schema_add_wire(sc, qRound(pts.first().x()), qRound(pts.first().y()),
-                        qRound(pts.last().x()),  qRound(pts.last().y()));
+        QVector<int> xy;
+        for (const QPointF &p : pts)
+            xy << qRound(p.x()) << qRound(p.y());
+        schema_add_wire(sc, xy.constData(), int(pts.size()));
     }
     schema_compute_nets(sc);
+    return sc;
+}
 
-    // 2. nœuds SPICE : les nets de masse deviennent "0"
+inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<WireItem *> &wires,
+                                bool ac = false)
+{
+    SpiceResult r;
+    QList<SymbolItem *> syms = symsIn;
+    std::sort(syms.begin(), syms.end(),
+              [](SymbolItem *a, SymbolItem *b) { return a->index < b->index; });
+
+    Schema *sc = buildSchema(syms, wires);
+
+    // nœuds SPICE : les nets de masse deviennent "0"
     QMap<int, QString> node;
     QMap<int, QStringList> members;
     bool hasGnd = false;
@@ -74,7 +87,6 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
         return node[n];
     };
 
-    // 3. une ligne par composant
     QStringList lines, models;
     static const QRegularExpression badChars("[^A-Za-z0-9_]");
     for (int c = 0; c < syms.size(); ++c) {
@@ -102,12 +114,16 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
             lines << QString("%1 %2 %3 %4 IC=%5").arg(name, n[0], n[1], v("C", "100n"), v("V", "0"));
         else if (k == "inductor")
             lines << QString("%1 %2 %3 %4 IC=%5").arg(name, n[0], n[1], v("L", "1m"), v("Ic", "0"));
-        else if (k == "vsource")
+        else if (k == "vsource") {
             lines << QString("%1 %2 %3 DC %4").arg(name, n[0], n[1], v("U", "5"));
-        else if (k == "vsin")
-            lines << QString("%1 %2 %3 SIN(%4 %5 %6)")
-                         .arg(name, n[0], n[1], v("Voff", "0"), v("Vamp", "1"), v("Freq", "1k"));
-        else if (k == "vpulse")
+            r.dcRefs << s->ref;
+            r.dcNames << name;
+        } else if (k == "vsin") {
+            lines << QString("%1 %2 %3 SIN(%4 %5 %6)%7")
+            .arg(name, n[0], n[1], v("Voff", "0"), v("Vamp", "1"), v("Freq", "1k"),
+                 ac ? QString(" AC 1") : QString());
+            if (ac) r.hasAc = true;
+        } else if (k == "vpulse")
             lines << QString("%1 %2 %3 PULSE(%4)").arg(name, n[0], n[1],
                                                        QStringList{v("V1", "0"), v("V2", "5"), v("Td", "0"), v("Tr", "1n"),
                                                                    v("Tf", "1n"), v("Pw", "500u"), v("Per", "1m")}.join(' '));
@@ -115,12 +131,10 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
             lines << QString("%1 %2 %3 M_%1").arg(name, n[0], n[1]);
             models << QString(".model M_%1 D(Is=%2 N=%3)").arg(name, v("Is", "1e-15"), v("N", "1"));
         } else if (k == "npn" || k == "pnp") {
-            // SPICE : Q collecteur base émetteur modèle
             lines << QString("%1 %2 %3 %4 M_%1").arg(name, n[1], n[0], n[2]);
             models << QString(".model M_%1 %2(Bf=%3 Is=%4)")
                           .arg(name, k == "npn" ? "NPN" : "PNP", v("Bf", "100"), v("Is", "1e-14"));
         } else if (k == "opamp") {
-            // E sortie 0 entrée+ entrée- gain
             lines << QString("%1 %2 0 %3 %4 %5").arg(name, n[2], n[0], n[1], v("A", "1e6"));
         }
     }
