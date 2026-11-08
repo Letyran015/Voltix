@@ -59,20 +59,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/ngspice
-          key: ngspice-${{ env.NGSPICE_VERSION }}-${{ runner.os }}-${{ runner.arch }}-v1
+          key: ngspice-${{ env.NGSPICE_VERSION }}-${{ runner.os }}-${{ runner.arch }}-v2
 
       - name: ngspice (Windows, binaires officiels)
         if: runner.os == 'Windows' && steps.ngcache.outputs.cache-hit != 'true'
         shell: bash
         env:
-          EXPECTED_SHA256: ""   # à renseigner après le premier build (voir la note)
+          EXPECTED_SHA256: ""   # à renseigner après le premier build réussi
         run: |
           set -euo pipefail
-          curl -fL --retry 3 -o ngspice.zip \
-            "https://sourceforge.net/projects/ngspice/files/ng-spice-rework/${NGSPICE_VERSION}/ngspice-${NGSPICE_VERSION}_64.zip/download"
-          sha256sum ngspice.zip
-          if [ -n "$EXPECTED_SHA256" ]; then echo "$EXPECTED_SHA256  ngspice.zip" | sha256sum -c -; fi
-          7z x ngspice.zip -ongspice_tmp -y > /dev/null
+          curl -fL --retry 3 -o ngspice.7z \
+            "https://sourceforge.net/projects/ngspice/files/ng-spice-rework/${NGSPICE_VERSION}/ngspice-${NGSPICE_VERSION}_64.7z/download"
+          sha256sum ngspice.7z
+          if [ -n "$EXPECTED_SHA256" ]; then echo "$EXPECTED_SHA256  ngspice.7z" | sha256sum -c -; fi
+          7z x ngspice.7z -ongspice_tmp -y > /dev/null
           exe=$(find ngspice_tmp -name ngspice_con.exe | head -1)
           root=$(dirname "$(dirname "$exe")")
           mkdir -p third_party
@@ -82,7 +82,7 @@ jobs:
         if: runner.os != 'Windows' && steps.ngcache.outputs.cache-hit != 'true'
         shell: bash
         env:
-          EXPECTED_SHA256: ""   # à renseigner après le premier build (voir la note)
+          EXPECTED_SHA256: ""   # à renseigner après le premier build réussi
         run: |
           set -euo pipefail
           curl -fL --retry 3 -o ngspice.tar.gz \
@@ -92,7 +92,7 @@ jobs:
           tar xzf ngspice.tar.gz
           cd "ngspice-${NGSPICE_VERSION}"
           ./configure --prefix="$GITHUB_WORKSPACE/third_party/ngspice" \
-            --with-x=no --with-readline=no --disable-debug
+            --with-x=no --with-readline=no --disable-debug --disable-openmp
           make -j4
           make install
           cp COPYING "$GITHUB_WORKSPACE/third_party/ngspice/COPYING"
