@@ -1,7 +1,9 @@
+@"
 [Desktop Entry]
 Type=Application
 Name=Voltix
-Comment=Éditeur de schémas électroniques avec simulation
+Comment=Editeur de schemas electroniques avec simulation
 Exec=Voltix
 Icon=voltix
 Categories=Engineering;Electronics;
+"@ | Out-File -Encoding ascii packaging\voltix.desktop
