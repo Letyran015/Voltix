@@ -45,6 +45,13 @@ MainWindow::MainWindow(QWidget *parent)
     fm->addSeparator();
     fm->addAction("&Enregistrer", QKeySequence::Save, this, &MainWindow::saveFile);
     fm->addAction("Enregistrer &sous…", QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
+
+    // Menu Simulation
+    QMenu *sm = menuBar()->addMenu("&Simulation");
+    sm->addAction("Point de fonctionnement &DC", QKeySequence(Qt::Key_F5), this,
+                  [view] { view->simulateDC(); });
+    sm->addAction("&Transitoire…", QKeySequence(Qt::Key_F6), this,
+                  [view] { view->simulateTran(); });
 }
 
 MainWindow::~MainWindow()

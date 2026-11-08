@@ -19,6 +19,8 @@ qt_add_executable(Voltix
     wireitem.h
     symbolitem.cpp
     propertiesdialog.h
+    spice.h
+    plotwidget.h
 )
 
 qt_add_translations(
@@ -44,3 +46,14 @@ qt_generate_deploy_app_script(
     NO_UNSUPPORTED_PLATFORM_ERROR
 )
 install(SCRIPT ${deploy_script})
+add_custom_command(TARGET Voltix POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/third_party/ngspice
+            $<TARGET_FILE_DIR:Voltix>/ngspice)
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/ngspice/
+        DESTINATION ${CMAKE_INSTALL_BINDIR}/ngspice)
+    add_custom_command(TARGET Voltix POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/third_party/ngspice
+                $<TARGET_FILE_DIR:Voltix>/ngspice)

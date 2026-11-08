@@ -18,6 +18,21 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include "spice.h"
+#include <QCoreApplication>
+#include <QDialog>
+#include <QFontDatabase>
+#include <QPlainTextEdit>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QVBoxLayout>
+#include "plotwidget.h"
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QLineEdit>
+#include <QRegularExpression>
 
 static const int GRID = 20;
 
@@ -459,6 +474,204 @@ bool SchemaView::loadFromFile(const QString &path)
     if (!scene()->items().isEmpty())
         centerOn(scene()->itemsBoundingRect().center());
     return true;
+}
+
+static QString findNgspice()
+{
+    const QString base = QCoreApplication::applicationDirPath();
+#ifdef Q_OS_WIN
+    const QString exe = base + "/ngspice/bin/ngspice_con.exe";
+#else
+    const QString exe = base + "/ngspice/bin/ngspice";
+#endif
+    if (QFile::exists(exe))
+        return exe;
+    return QStandardPaths::findExecutable("ngspice");   // secours (développement)
+}
+
+void SchemaView::simulateDC()
+{
+    QList<SymbolItem *> syms;
+    QList<WireItem *> wires;
+    for (QGraphicsItem *it : scene()->items()) {
+        if (auto *s = dynamic_cast<SymbolItem *>(it)) syms << s;
+        else if (auto *w = dynamic_cast<WireItem *>(it)) wires << w;
+    }
+
+    const SpiceResult r = buildNetlist(syms, wires);
+    if (!r.error.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", r.error);
+        return;
+    }
+
+    const QString exe = findNgspice();
+    if (exe.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", "ngspice est introuvable.");
+        return;
+    }
+
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        return;
+    QFile cir(dir.filePath("circuit.cir"));
+    if (!cir.open(QIODevice::WriteOnly | QIODevice::Text))
+        return;
+    cir.write(r.netlist.toUtf8());
+    cir.close();
+
+    QProcess proc;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("SPICE_SCRIPTS",
+               QCoreApplication::applicationDirPath() + "/ngspice/share/ngspice/scripts");
+    proc.setProcessEnvironment(env);
+    proc.setWorkingDirectory(dir.path());
+    proc.start(exe, {"-b", "-o", "out.log", "circuit.cir"});
+    if (!proc.waitForFinished(15000)) {
+        proc.kill();
+        QMessageBox::warning(this, "Simulation", "ngspice ne répond pas (délai dépassé).");
+        return;
+    }
+
+    QFile out(dir.filePath("out.log"));
+    QString log = out.open(QIODevice::ReadOnly | QIODevice::Text)
+                      ? QString::fromUtf8(out.readAll())
+                      : QString::fromUtf8(proc.readAllStandardOutput());
+
+    const QString text = "=== Nœuds ===\n" + r.legend + "\n=== Netlist ===\n" + r.netlist
+                         + "\n=== Résultat ngspice ===\n" + log;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Simulation : point de fonctionnement DC");
+    dlg.resize(700, 600);
+    auto *lay = new QVBoxLayout(&dlg);
+    auto *edit = new QPlainTextEdit(text);
+    edit->setReadOnly(true);
+    edit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    lay->addWidget(edit);
+    dlg.exec();
+}
+
+void SchemaView::simulateTran()
+{
+    QList<SymbolItem *> syms;
+    QList<WireItem *> wires;
+    for (QGraphicsItem *it : scene()->items()) {
+        if (auto *s = dynamic_cast<SymbolItem *>(it)) syms << s;
+        else if (auto *w = dynamic_cast<WireItem *>(it)) wires << w;
+    }
+
+    const SpiceResult r = buildNetlist(syms, wires);
+    if (!r.error.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", r.error);
+        return;
+    }
+    if (r.nodes.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", "Aucun nœud à tracer.");
+        return;
+    }
+
+    // 1. paramètres
+    QDialog pd(this);
+    pd.setWindowTitle("Simulation transitoire");
+    auto *form = new QFormLayout(&pd);
+    auto *eStop = new QLineEdit("500u");
+    auto *eStep = new QLineEdit("1u");
+    form->addRow("Durée (ex. 5m, 500u) :", eStop);
+    form->addRow("Pas (ex. 1u) :", eStep);
+    auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    form->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &pd, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &pd, &QDialog::reject);
+    if (pd.exec() != QDialog::Accepted)
+        return;
+
+    const QString stop = eStop->text().trimmed();
+    const QString step = eStep->text().trimmed();
+    const QRegularExpression re(
+        "^[0-9]+(\\.[0-9]+)?(e[-+]?[0-9]+)?(f|p|n|u|m|k|meg|g|t)?$",
+        QRegularExpression::CaseInsensitiveOption);
+    if (!re.match(stop).hasMatch() || !re.match(step).hasMatch()) {
+        QMessageBox::warning(this, "Simulation",
+                             "Valeur invalide. Exemples : 5m, 500u, 1u, 0.001");
+        return;
+    }
+
+    // 2. netlist transitoire (uic : les condensateurs partent de leur tension initiale)
+    const QString vecs = "v(" + r.nodes.join(") v(") + ")";
+    const QString net = r.body
+                        + QString(".control\ntran %1 %2 uic\nwrdata out.txt %3\n.endc\n.end\n")
+                              .arg(step, stop, vecs);
+
+    const QString exe = findNgspice();
+    if (exe.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", "ngspice est introuvable.");
+        return;
+    }
+
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        return;
+    QFile cir(dir.filePath("circuit.cir"));
+    if (!cir.open(QIODevice::WriteOnly | QIODevice::Text))
+        return;
+    cir.write(net.toUtf8());
+    cir.close();
+
+    QProcess proc;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("SPICE_SCRIPTS",
+               QCoreApplication::applicationDirPath() + "/ngspice/share/ngspice/scripts");
+    proc.setProcessEnvironment(env);
+    proc.setWorkingDirectory(dir.path());
+    proc.start(exe, {"-b", "-o", "out.log", "circuit.cir"});
+    if (!proc.waitForFinished(30000)) {
+        proc.kill();
+        QMessageBox::warning(this, "Simulation", "ngspice ne répond pas (délai dépassé).");
+        return;
+    }
+
+    // 3. lecture des résultats : colonnes = temps, v1, temps, v2, ...
+    QVector<double> t;
+    QList<QVector<double>> series;
+    for (int k = 0; k < r.nodes.size(); ++k)
+        series << QVector<double>();
+
+    QFile out(dir.filePath("out.txt"));
+    if (out.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!out.atEnd()) {
+            const QStringList c = QString::fromUtf8(out.readLine())
+            .trimmed()
+                .split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            if (c.size() < 2 * r.nodes.size())
+                continue;
+            bool ok = true;
+            const double tv = c[0].toDouble(&ok);
+            if (!ok)
+                continue;
+            t << tv;
+            for (int k = 0; k < r.nodes.size(); ++k)
+                series[k] << c[2 * k + 1].toDouble();
+        }
+    }
+
+    if (t.size() < 2) {
+        QFile lg(dir.filePath("out.log"));
+        const QString log = lg.open(QIODevice::ReadOnly | QIODevice::Text)
+                                ? QString::fromUtf8(lg.readAll()) : QString();
+        QMessageBox::warning(this, "Simulation",
+                             "Aucun résultat.\n\n" + log.right(800));
+        return;
+    }
+
+    // 4. courbe
+    QDialog dlg(this);
+    dlg.setWindowTitle("Simulation transitoire");
+    auto *lay = new QVBoxLayout(&dlg);
+    auto *plot = new PlotWidget;
+    plot->setData(t, series, r.nodes);
+    lay->addWidget(plot);
+    dlg.resize(800, 520);
+    dlg.exec();
 }
 
 void SchemaView::keyPressEvent(QKeyEvent *e)

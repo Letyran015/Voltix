@@ -15,6 +15,8 @@ public:
         void clearAll();
         bool saveToFile(const QString &path);
         bool loadFromFile(const QString &path);
+        void simulateDC();
+        void simulateTran();
 
 protected:
     void drawBackground(QPainter *p, const QRectF &rect) override;
