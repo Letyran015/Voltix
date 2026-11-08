@@ -12,7 +12,6 @@ permissions:
 
 env:
   NGSPICE_VERSION: "47"
-  QT_VERSION: "6.8.3"
 
 jobs:
   build:
@@ -25,14 +24,17 @@ jobs:
           - name: Windows
             os: windows-latest
             qt_arch: win64_msvc2022_64
+            qt_version: "6.8.3"
             artifact: Voltix-Windows
           - name: Linux
             os: ubuntu-22.04
             qt_arch: ""
+            qt_version: "6.8.3"
             artifact: Voltix-Linux
           - name: macOS
             os: macos-latest
             qt_arch: ""
+            qt_version: "6.9.3"
             artifact: Voltix-macOS
 
     steps:
@@ -41,7 +43,7 @@ jobs:
       - name: Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: ${{ env.QT_VERSION }}
+          version: ${{ matrix.qt_version }}
           arch: ${{ matrix.qt_arch }}
           cache: true
 
@@ -126,6 +128,7 @@ jobs:
       - name: Paquet Linux
         if: runner.os == 'Linux'
         run: |
+          printf '[Desktop Entry]\nType=Application\nName=Voltix\nComment=Editeur de schemas electroniques avec simulation\nExec=Voltix\nIcon=voltix\nCategories=Engineering;Electronics;\n' > voltix.desktop
           [ -f packaging/voltix.png ] || convert -size 256x256 xc:'#1e6fd9' packaging/voltix.png
           cmake --install build --prefix AppDir/usr
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
@@ -136,7 +139,7 @@ jobs:
           export LD_LIBRARY_PATH="$QT_ROOT_DIR/lib:${LD_LIBRARY_PATH:-}"
           export VERSION="${GITHUB_REF_NAME}"
           ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt \
-            -e AppDir/usr/bin/Voltix -d packaging/voltix.desktop -i packaging/voltix.png \
+            -e AppDir/usr/bin/Voltix -d voltix.desktop -i packaging/voltix.png \
             --output appimage
           mkdir -p package
           mv Voltix*.AppImage package/Voltix-x86_64.AppImage
