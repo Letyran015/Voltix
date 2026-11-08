@@ -18,6 +18,7 @@ qt_add_executable(Voltix
     schemaview.cpp
     wireitem.h
     symbolitem.cpp
+    propertiesdialog.h
 )
 
 qt_add_translations(

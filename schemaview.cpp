@@ -2,7 +2,7 @@
 #include "symbolitem.h"
 #include "wireitem.h"
 #include "core.h"
-
+#include "propertiesdialog.h"
 #include <QDebug>
 #include <QGraphicsScene>
 #include <QKeyEvent>
@@ -211,6 +211,13 @@ void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
             wireClick(mapToScene(pos));
         return;
     }
+    if (e->button() == Qt::LeftButton) {
+        if (auto *s = dynamic_cast<SymbolItem *>(itemAt(pos))) {
+            PropertiesDialog dlg(s, this);
+            dlg.exec();
+            return;
+        }
+    }
     if (e->button() == Qt::LeftButton && !itemAt(pos)) {
         SymbolItem *s = makeSymbol(m_kind);
         if (s) {
@@ -311,6 +318,16 @@ bool SchemaView::saveToFile(const QString &path)
         o["x"] = s->pos().x();
         o["y"] = s->pos().y();
         o["rotation"] = s->rotation();
+        o["showRef"] = s->showRef;
+        QJsonArray pa;
+        for (const Prop &pr : std::as_const(s->props)) {
+            QJsonObject po;
+            po["name"] = pr.name;
+            po["value"] = pr.value;
+            po["show"] = pr.show;
+            pa.append(po);
+        }
+        o["props"] = pa;
         comps.append(o);
     }
 
@@ -377,6 +394,17 @@ bool SchemaView::loadFromFile(const QString &path)
         }
         s->ref = o["ref"].toString();
         s->index = o["index"].toInt();
+        s->showRef = o["showRef"].toBool(s->showRef);
+        const QJsonArray pa = o["props"].toArray();
+        for (const QJsonValue &pv : pa) {
+            const QJsonObject po = pv.toObject();
+            for (Prop &pr : s->props) {
+                if (pr.name == po["name"].toString()) {
+                    pr.value = po["value"].toString();
+                    pr.show = po["show"].toBool();
+                }
+            }
+        }
         s->setRotation(o["rotation"].toDouble());
         s->setPos(o["x"].toDouble(), o["y"].toDouble());
         scene()->addItem(s);
