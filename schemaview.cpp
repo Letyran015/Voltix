@@ -35,6 +35,8 @@
 #include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
+#include <QDir>
+#include <QListWidget>
 
 static const int GRID = 20;
 
@@ -640,16 +642,35 @@ void SchemaView::dumpNets()
 // ------------------------------------------------------------------
 //  Simulation : utilitaires
 // ------------------------------------------------------------------
-static QString findNgspice()
+static QString ngspiceRoot()
 {
     const QString base = QCoreApplication::applicationDirPath();
-#ifdef Q_OS_WIN
-    const QString exe = base + "/ngspice/bin/ngspice_con.exe";
-#else
-    const QString exe = base + "/ngspice/bin/ngspice";
+    QStringList roots = {base + "/ngspice"};
+#ifdef Q_OS_MACOS
+    roots.prepend(base + "/../Resources/ngspice");
 #endif
-    if (QFile::exists(exe))
-        return exe;
+    for (const QString &r : std::as_const(roots)) {
+#ifdef Q_OS_WIN
+        const QString exe = r + "/bin/ngspice_con.exe";
+#else
+        const QString exe = r + "/bin/ngspice";
+#endif
+        if (QFile::exists(exe))
+            return QDir::cleanPath(r);
+    }
+    return QString();
+}
+
+static QString findNgspice()
+{
+    const QString root = ngspiceRoot();
+    if (!root.isEmpty()) {
+#ifdef Q_OS_WIN
+        return root + "/bin/ngspice_con.exe";
+#else
+        return root + "/bin/ngspice";
+#endif
+    }
     return QStandardPaths::findExecutable("ngspice");   // secours (développement)
 }
 
@@ -682,8 +703,13 @@ static SpiceRun runNgspice(const QString &net, int timeoutMs)
 
     QProcess proc;
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert("SPICE_SCRIPTS",
-               QCoreApplication::applicationDirPath() + "/ngspice/share/ngspice/scripts");
+    const QString root = ngspiceRoot();
+    if (!root.isEmpty()) {
+        env.insert("SPICE_SCRIPTS", root + "/share/ngspice/scripts");
+#ifndef Q_OS_WIN
+        env.insert("SPICE_LIB_DIR", root + "/share/ngspice");
+#endif
+    }
     proc.setProcessEnvironment(env);
     proc.setWorkingDirectory(dir.path());
     proc.start(exe, {"-b", "-o", "out.log", "circuit.cir"});
@@ -767,6 +793,29 @@ static void showPlots(QWidget *parent, const QString &title, const QList<PlotWid
     dlg.exec();
 }
 
+static QListWidget *addNodeList(QFormLayout *form, const SpiceResult &r)
+{
+    auto *lw = new QListWidget;
+    lw->setMaximumHeight(140);
+    for (const QString &n : r.nodes) {
+        const QString d = r.nodeDesc.value(n);
+        auto *it = new QListWidgetItem(d.isEmpty() ? n : QString("%1   (%2)").arg(n, d), lw);
+        it->setData(Qt::UserRole, n);
+        it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
+        it->setCheckState(Qt::Checked);
+    }
+    form->addRow("Courbes à tracer :", lw);
+    return lw;
+}
+
+static QStringList checkedNodes(const QListWidget *lw)
+{
+    QStringList out;
+    for (int i = 0; i < lw->count(); ++i)
+        if (lw->item(i)->checkState() == Qt::Checked)
+            out << lw->item(i)->data(Qt::UserRole).toString();
+    return out;
+}
 // ------------------------------------------------------------------
 //  Simulations
 // ------------------------------------------------------------------
@@ -825,6 +874,7 @@ void SchemaView::simulateTran()
     auto *eStep = new QLineEdit("1u");
     form->addRow("Durée (ex. 5m, 500u) :", eStop);
     form->addRow("Pas (ex. 1u) :", eStep);
+    QListWidget *list = addNodeList(form, r);
     auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     form->addRow(bb);
     connect(bb, &QDialogButtonBox::accepted, &pd, &QDialog::accept);
@@ -832,6 +882,11 @@ void SchemaView::simulateTran()
     if (pd.exec() != QDialog::Accepted)
         return;
 
+    const QStringList sel = checkedNodes(list);
+    if (sel.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", "Cochez au moins une courbe.");
+        return;
+    }
     const QString stop = eStop->text().trimmed();
     const QString step = eStep->text().trimmed();
     if (!posNumber().match(stop).hasMatch() || !posNumber().match(step).hasMatch()) {
@@ -839,7 +894,7 @@ void SchemaView::simulateTran()
         return;
     }
 
-    const QString vecs = "v(" + r.nodes.join(") v(") + ")";
+    const QString vecs = "v(" + sel.join(") v(") + ")";
     const QString net = r.body
                         + QString(".control\ntran %1 %2 uic\nwrdata out.txt %3\n.endc\n.end\n")
                               .arg(step, stop, vecs);
@@ -852,13 +907,13 @@ void SchemaView::simulateTran()
 
     QVector<double> t;
     QList<QVector<double>> series;
-    if (!parseColumns(run.out, int(r.nodes.size()), t, series)) {
+    if (!parseColumns(run.out, int(sel.size()), t, series)) {
         QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
         return;
     }
 
     QStringList names;
-    for (const QString &n : r.nodes)
+    for (const QString &n : sel)
         names << "V(" + n + ")";
     auto *plot = new PlotWidget;
     plot->setAxes("s", "V");
@@ -899,6 +954,7 @@ void SchemaView::simulateSweep()
     form->addRow("Début (V) :", eStart);
     form->addRow("Fin (V) :", eStop);
     form->addRow("Pas (V) :", eStep);
+    QListWidget *list = addNodeList(form, r);
     auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     form->addRow(bb);
     connect(bb, &QDialogButtonBox::accepted, &pd, &QDialog::accept);
@@ -906,6 +962,11 @@ void SchemaView::simulateSweep()
     if (pd.exec() != QDialog::Accepted)
         return;
 
+    const QStringList sel = checkedNodes(list);
+    if (sel.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", "Cochez au moins une courbe.");
+        return;
+    }
     const QString a = eStart->text().trimmed(), b = eStop->text().trimmed(),
         c = eStep->text().trimmed();
     if (!signedNumber().match(a).hasMatch() || !signedNumber().match(b).hasMatch()
@@ -915,7 +976,7 @@ void SchemaView::simulateSweep()
         return;
     }
 
-    const QString vecs = "v(" + r.nodes.join(") v(") + ")";
+    const QString vecs = "v(" + sel.join(") v(") + ")";
     const QString net = r.body
                         + QString(".control\ndc %1 %2 %3 %4\nwrdata out.txt %5\n.endc\n.end\n")
                               .arg(r.dcNames[cb->currentIndex()], a, b, c, vecs);
@@ -928,13 +989,13 @@ void SchemaView::simulateSweep()
 
     QVector<double> x;
     QList<QVector<double>> series;
-    if (!parseColumns(run.out, int(r.nodes.size()), x, series)) {
+    if (!parseColumns(run.out, int(sel.size()), x, series)) {
         QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
         return;
     }
 
     QStringList names;
-    for (const QString &n : r.nodes)
+    for (const QString &n : sel)
         names << "V(" + n + ")";
     auto *plot = new PlotWidget;
     plot->setAxes("V", "V");
@@ -973,6 +1034,7 @@ void SchemaView::simulateAC()
     form->addRow("Fréquence de début (Hz) :", eStart);
     form->addRow("Fréquence de fin (Hz) :", eStop);
     form->addRow("Points par décade :", ePts);
+    QListWidget *list = addNodeList(form, r);
     auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     form->addRow(bb);
     connect(bb, &QDialogButtonBox::accepted, &pd, &QDialog::accept);
@@ -980,6 +1042,11 @@ void SchemaView::simulateAC()
     if (pd.exec() != QDialog::Accepted)
         return;
 
+    const QStringList sel = checkedNodes(list);
+    if (sel.isEmpty()) {
+        QMessageBox::warning(this, "Simulation", "Cochez au moins une courbe.");
+        return;
+    }
     const QString f1 = eStart->text().trimmed(), f2 = eStop->text().trimmed(),
         np = ePts->text().trimmed();
     static const QRegularExpression integer("^[0-9]{1,4}$");
@@ -991,7 +1058,7 @@ void SchemaView::simulateAC()
     }
 
     QStringList vecs;
-    for (const QString &n : r.nodes)
+    for (const QString &n : sel)
         vecs << QString("db(v(%1)) phase(v(%1))").arg(n);
     const QString net = r.body
                         + QString(".control\nac dec %1 %2 %3\nwrdata out.txt %4\n.endc\n.end\n")
@@ -1005,7 +1072,7 @@ void SchemaView::simulateAC()
 
     QVector<double> f;
     QList<QVector<double>> raw;
-    const int nodes = int(r.nodes.size());
+    const int nodes = int(sel.size());
     if (!parseColumns(run.out, 2 * nodes, f, raw)) {
         QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
         return;
@@ -1023,7 +1090,7 @@ void SchemaView::simulateAC()
             while (ph[i] - ph[i - 1] < -180.0) ph[i] += 360.0;
         }
         phase << ph;
-        names << "V(" + r.nodes[k] + ")";
+        names << "V(" + sel[k] + ")";
     }
 
     auto *pg = new PlotWidget;

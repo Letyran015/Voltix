@@ -52,7 +52,7 @@ public:
         return path;
     }
 
-    QStringList labelLines() const
+    virtual QStringList labelLines() const
     {
         QStringList lines;
         if (showRef && !ref.isEmpty())
@@ -397,8 +397,39 @@ protected:
     }
 };
 
+// ---------- Étiquette de nœud (une broche) ----------
+class LabelItem : public SymbolItem
+{
+public:
+    LabelItem()
+    {
+        showRef = false;
+        props = {
+                  {"Nom", "Vout", "", "Nom du nœud (lettres, chiffres, _)", false},
+                  };
+    }
+    QString prefix() const override { return "LBL"; }
+    QString kind() const override { return "label"; }
+    QString title() const override { return "Étiquette de nœud"; }
+    int pinCount() const override { return 1; }
+    QPointF pinLocal(int) const override { return QPointF(0, 0); }
+    QStringList labelLines() const override
+    {
+        return QStringList{props.isEmpty() ? QString() : props[0].value};
+    }
+protected:
+    QRectF bodyRect() const override { return QRectF(-4, -9, 42, 18); }
+    void drawBody(QPainter *p) const override
+    {
+        p->drawLine(0, 0, 12, 0);
+        p->drawPolygon(QPolygonF({QPointF(12, 0), QPointF(18, -7), QPointF(34, -7),
+                                  QPointF(34, 7), QPointF(18, 7)}));
+    }
+};
+
 inline SymbolItem *makeSymbol(const QString &kind)
 {
+    if (kind == "label")     return new LabelItem;
     if (kind == "resistor")  return new ResistorItem;
     if (kind == "capacitor") return new CapacitorItem;
     if (kind == "diode")     return new DiodeItem;

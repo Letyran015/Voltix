@@ -1,0 +1,8 @@
+Voltix utilise les composants tiers suivants.
+
+ngspice - simulateur de circuits (https://ngspice.sourceforge.io)
+  Licence BSD modifiée (3 clauses) : voir ngspice-COPYING.txt.
+
+Qt - bibliothèque d'interface (https://www.qt.io)
+  Licence LGPL v3, liaison dynamique (DLL / bibliothèques partagées).
+  Le code source de Qt est disponible sur https://download.qt.io

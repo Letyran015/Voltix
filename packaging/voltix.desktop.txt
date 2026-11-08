@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Voltix
+Comment=Éditeur de schémas électroniques avec simulation
+Exec=Voltix
+Icon=voltix
+Categories=Engineering;Electronics;

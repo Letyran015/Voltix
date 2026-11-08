@@ -5,18 +5,20 @@
 
 #include <QMap>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStringList>
 #include <QVector>
 #include <algorithm>
 
 struct SpiceResult {
     QString netlist;
-    QString body;           // netlist sans section .control
-    QString legend;         // correspondance nœud -> broches
-    QStringList nodes;      // nœuds SPICE hors masse
-    QStringList dcRefs;     // sources DC (noms affichés)
-    QStringList dcNames;    // sources DC (noms SPICE)
-    bool hasAc = false;     // au moins une source sinus avec AC 1
+    QString body;                     // netlist sans section .control
+    QString legend;                   // correspondance nœud -> broches
+    QStringList nodes;                // nœuds SPICE hors masse (reliés à un composant)
+    QMap<QString, QString> nodeDesc;  // nœud -> "R1.2, C1.1"
+    QStringList dcRefs;               // sources DC (noms affichés)
+    QStringList dcNames;              // sources DC (noms SPICE)
+    bool hasAc = false;               // au moins une source sinus avec AC 1
     QString error;
 };
 
@@ -30,6 +32,22 @@ inline QString spiceValue(const SymbolItem *s, const QString &name, const QStrin
         return ok.match(v).hasMatch() ? v : def;
     }
     return def;
+}
+
+// nom de nœud issu d'une étiquette, toujours sûr pour la netlist
+inline QString labelName(const SymbolItem *s)
+{
+    static const QRegularExpression bad("[^A-Za-z0-9_]");
+    QString nm;
+    for (const Prop &p : s->props)
+        if (p.name == "Nom")
+            nm = p.value.trimmed();
+    nm.remove(bad);
+    if (nm.isEmpty() || nm[0].isDigit())
+        nm = "n_" + nm;
+    if (nm.compare("gnd", Qt::CaseInsensitive) == 0)
+        nm += "_";                      // "gnd" est un alias de la masse en SPICE
+    return nm;
 }
 
 // modèle C du schéma ; syms doit être trié par index
@@ -63,15 +81,32 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
 
     Schema *sc = buildSchema(syms, wires);
 
-    // nœuds SPICE : les nets de masse deviennent "0"
     QMap<int, QString> node;
     QMap<int, QStringList> members;
+    QSet<QString> used;                 // noms déjà pris (en minuscules)
+    used << "0";
     bool hasGnd = false;
+
+    // 1. masse = nœud 0
     for (int c = 0; c < syms.size(); ++c)
         if (syms[c]->kind() == "ground") {
             const int n = schema_pin_net(sc, c, 0);
             if (n >= 0) { node[n] = "0"; hasGnd = true; }
         }
+
+    // 2. étiquettes : elles nomment leur net (la première gagne)
+    for (int c = 0; c < syms.size(); ++c) {
+        if (syms[c]->kind() != "label") continue;
+        const int n = schema_pin_net(sc, c, 0);
+        if (n < 0 || node.contains(n)) continue;
+        const QString base = labelName(syms[c]);
+        QString nm = base;
+        int k = 2;
+        while (used.contains(nm.toLower()))
+            nm = base + "_" + QString::number(k++);
+        used << nm.toLower();
+        node[n] = nm;
+    }
 
     int next = 1;
     QStringList floating;
@@ -81,8 +116,12 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
             floating << QString("%1.%2").arg(syms[c]->ref).arg(p + 1);
             return "?";
         }
-        if (!node.contains(n))
-            node[n] = QString("n%1").arg(next++);
+        if (!node.contains(n)) {
+            QString nm;
+            do { nm = QString("n%1").arg(next++); } while (used.contains(nm));
+            used << nm;
+            node[n] = nm;
+        }
         members[n] << QString("%1.%2").arg(syms[c]->ref).arg(p + 1);
         return node[n];
     };
@@ -92,7 +131,7 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
     for (int c = 0; c < syms.size(); ++c) {
         SymbolItem *s = syms[c];
         const QString k = s->kind();
-        if (k == "ground") continue;
+        if (k == "ground" || k == "label") continue;
 
         QString name = s->ref;
         name.remove(badChars);
@@ -153,9 +192,14 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
     r.netlist = r.body + ".control\nop\nprint all\n.endc\n.end\n";
 
     for (auto it = node.cbegin(); it != node.cend(); ++it) {
-        r.legend += QString("%1 : %2\n").arg(it.value(), members[it.key()].join(", "));
-        if (it.value() != "0")
+        if (!members.contains(it.key()))
+            continue;                               // nœud sans composant (étiquette seule)
+        const QString desc = members[it.key()].join(", ");
+        r.legend += QString("%1 : %2\n").arg(it.value(), desc);
+        if (it.value() != "0") {
             r.nodes << it.value();
+            r.nodeDesc[it.value()] = desc;
+        }
     }
     return r;
 }

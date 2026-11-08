@@ -29,10 +29,10 @@ MainWindow::MainWindow(QWidget *parent)
     auto *group = new QActionGroup(this);
     const QStringList names = {"Résistance", "Condensateur", "Inductance", "Diode",
                                "Source DC", "Source sinus", "Source impulsion",
-                               "NPN", "PNP", "Ampli-op", "Masse"};
+                               "NPN", "PNP", "Ampli-op", "Masse", "Étiquette"};
     const QStringList ids   = {"resistor", "capacitor", "inductor", "diode",
                              "vsource", "vsin", "vpulse",
-                             "npn", "pnp", "opamp", "ground"};
+                             "npn", "pnp", "opamp", "ground", "label"};
     for (int i = 0; i < names.size(); ++i) {
         QAction *a = tb->addAction(names[i]);
         a->setCheckable(true);
@@ -69,6 +69,16 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(view, &SchemaView::stateChanged, this, &MainWindow::updateState);
     updateState();
+
+    // Menu Aide
+    QMenu *hm = menuBar()->addMenu("&Aide");
+    hm->addAction("À &propos de Voltix", this, [this] {
+        QMessageBox::about(this, "À propos de Voltix",
+                           "<b>Voltix</b> : éditeur de schémas avec simulation.<br><br>"
+                           "Simulation : <a href='https://ngspice.sourceforge.io'>ngspice</a> (licence BSD).<br>"
+                           "Interface : <a href='https://www.qt.io'>Qt</a> (LGPL).<br>"
+                           "Les textes de licence sont dans le dossier « licenses ».");
+    });
 }
 
 MainWindow::~MainWindow()
