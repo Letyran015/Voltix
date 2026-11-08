@@ -7,6 +7,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTransform>
+#include <cmath>
 
 class WireItem;
 
@@ -240,12 +241,179 @@ protected:
     }
 };
 
+// ---------- Inductance ----------
+class InductorItem : public SymbolItem
+{
+public:
+    InductorItem()
+    {
+        props = {
+                  {"L", "1m", "H", "Inductance en henrys", true},
+                  {"Ic", "0", "A", "Courant initial", false},
+                  };
+    }
+    QString prefix() const override { return "L"; }
+    QString kind() const override { return "inductor"; }
+    QString title() const override { return "Inductance"; }
+    int pinCount() const override { return 2; }
+    QPointF pinLocal(int i) const override { return i == 0 ? QPointF(-40, 0) : QPointF(40, 0); }
+protected:
+    QRectF bodyRect() const override { return QRectF(-44, -10, 88, 20); }
+    void drawBody(QPainter *p) const override
+    {
+        p->drawLine(-40, 0, -20, 0);
+        p->drawLine(20, 0, 40, 0);
+        for (int i = 0; i < 4; ++i)
+            p->drawArc(QRectF(-20 + 10 * i, -5, 10, 10), 0, 180 * 16);   // 4 demi-cercles
+    }
+};
+
+// ---------- Source sinusoïdale / impulsion (0 = +, 1 = -) ----------
+class WaveSourceItem : public SymbolItem
+{
+public:
+    explicit WaveSourceItem(bool pulse) : m_pulse(pulse)
+    {
+        if (pulse)
+            props = {
+                      {"V1", "0", "V", "Niveau bas", true},
+                      {"V2", "5", "V", "Niveau haut", true},
+                      {"Td", "0", "s", "Retard", false},
+                      {"Tr", "1n", "s", "Temps de montée", false},
+                      {"Tf", "1n", "s", "Temps de descente", false},
+                      {"Pw", "500u", "s", "Durée du niveau haut", true},
+                      {"Per", "1m", "s", "Période", true},
+                      };
+        else
+            props = {
+                      {"Voff", "0", "V", "Tension continue (offset)", false},
+                      {"Vamp", "1", "V", "Amplitude", true},
+                      {"Freq", "1k", "Hz", "Fréquence", true},
+                      };
+    }
+    QString prefix() const override { return "V"; }
+    QString kind() const override { return m_pulse ? "vpulse" : "vsin"; }
+    QString title() const override { return m_pulse ? "Source impulsion" : "Source sinusoïdale"; }
+    int pinCount() const override { return 2; }
+    QPointF pinLocal(int i) const override { return i == 0 ? QPointF(-40, 0) : QPointF(40, 0); }
+protected:
+    QRectF bodyRect() const override { return QRectF(-44, -24, 88, 48); }
+    void drawBody(QPainter *p) const override
+    {
+        p->drawLine(-40, 0, -20, 0);
+        p->drawLine(20, 0, 40, 0);
+        p->drawEllipse(QPointF(0, 0), 20, 20);
+        p->drawLine(-33, -9, -27, -9);          // signe + près de la broche 0
+        p->drawLine(-30, -12, -30, -6);
+        if (m_pulse) {
+            QPolygonF w;
+            w << QPointF(-12, 6) << QPointF(-12, -6) << QPointF(-2, -6)
+              << QPointF(-2, 6) << QPointF(8, 6) << QPointF(8, -6) << QPointF(12, -6);
+            p->drawPolyline(w);
+        } else {
+            QPolygonF w;
+            for (int i = 0; i <= 24; ++i) {
+                const double x = -12 + i;
+                w << QPointF(x, -7 * std::sin((x + 12) / 24.0 * 2 * M_PI));
+            }
+            p->drawPolyline(w);
+        }
+    }
+private:
+    bool m_pulse;
+};
+
+// ---------- Transistor bipolaire (0 = base, 1 = collecteur, 2 = émetteur) ----------
+class BjtItem : public SymbolItem
+{
+public:
+    explicit BjtItem(bool pnp) : m_pnp(pnp)
+    {
+        props = {
+                  {"Bf", "100", "", "Gain en courant", false},
+                  {"Is", "1e-14", "A", "Courant de saturation", false},
+                  };
+    }
+    QString prefix() const override { return "Q"; }
+    QString kind() const override { return m_pnp ? "pnp" : "npn"; }
+    QString title() const override { return m_pnp ? "Transistor PNP" : "Transistor NPN"; }
+    int pinCount() const override { return 3; }
+    QPointF pinLocal(int i) const override
+    {
+        if (i == 0) return QPointF(-40, 0);
+        if (i == 1) return QPointF(20, -40);
+        return QPointF(20, 40);
+    }
+protected:
+    QRectF bodyRect() const override { return QRectF(-44, -44, 68, 88); }
+    void drawBody(QPainter *p) const override
+    {
+        p->drawLine(-40, 0, -10, 0);                            // base
+        p->drawLine(-10, -20, -10, 20);                         // barre
+        p->drawLine(-10, -8, 20, -20); p->drawLine(20, -20, 20, -40);   // collecteur
+        p->drawLine(-10, 8, 20, 20);   p->drawLine(20, 20, 20, 40);     // émetteur
+
+        QPolygonF a;
+        if (!m_pnp) a << QPointF(17, 18.8) << QPointF(6.5, 18.9) << QPointF(9.5, 11.5);   // sort
+        else        a << QPointF(-4, 10.4) << QPointF(3.5, 17.7) << QPointF(6.5, 10.3);   // entre
+        p->setBrush(p->pen().color());
+        p->drawPolygon(a);
+        p->setBrush(Qt::NoBrush);
+    }
+private:
+    bool m_pnp;
+};
+
+// ---------- Ampli-op (0 = entrée +, 1 = entrée -, 2 = sortie) ----------
+class OpAmpItem : public SymbolItem
+{
+public:
+    OpAmpItem()
+    {
+        props = {
+                  {"A", "1e6", "", "Gain en boucle ouverte", false},
+                  };
+    }
+    QString prefix() const override { return "U"; }
+    QString kind() const override { return "opamp"; }
+    QString title() const override { return "Amplificateur opérationnel"; }
+    int pinCount() const override { return 3; }
+    QPointF pinLocal(int i) const override
+    {
+        if (i == 0) return QPointF(-40, -20);
+        if (i == 1) return QPointF(-40, 20);
+        return QPointF(40, 0);
+    }
+protected:
+    QRectF bodyRect() const override { return QRectF(-44, -44, 88, 88); }
+    void drawBody(QPainter *p) const override
+    {
+        p->drawLine(-40, -20, -20, -20);
+        p->drawLine(-40, 20, -20, 20);
+        p->drawPolygon(QPolygonF({QPointF(-20, -40), QPointF(-20, 40), QPointF(40, 0)}));
+        p->drawLine(-17, -20, -11, -20);        // +
+        p->drawLine(-14, -23, -14, -17);
+        p->drawLine(-17, 20, -11, 20);          // -
+    }
+};
+
 inline SymbolItem *makeSymbol(const QString &kind)
 {
     if (kind == "resistor")  return new ResistorItem;
     if (kind == "capacitor") return new CapacitorItem;
     if (kind == "diode")     return new DiodeItem;
     if (kind == "vsource")   return new VoltageSourceItem;
+    if (kind == "ground")    return new GroundItem;
+    if (kind == "resistor")  return new ResistorItem;
+    if (kind == "capacitor") return new CapacitorItem;
+    if (kind == "inductor")  return new InductorItem;
+    if (kind == "diode")     return new DiodeItem;
+    if (kind == "vsource")   return new VoltageSourceItem;
+    if (kind == "vsin")      return new WaveSourceItem(false);
+    if (kind == "vpulse")    return new WaveSourceItem(true);
+    if (kind == "npn")       return new BjtItem(false);
+    if (kind == "pnp")       return new BjtItem(true);
+    if (kind == "opamp")     return new OpAmpItem;
     if (kind == "ground")    return new GroundItem;
     return nullptr;
 }

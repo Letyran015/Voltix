@@ -4,22 +4,27 @@
 #include "core.h"
 
 #include <QMap>
+#include <QRegularExpression>
 #include <QStringList>
 #include <algorithm>
 
 struct SpiceResult {
     QString netlist;
-    QString legend;   // correspondance nœud -> broches
-    QString error;
     QString body;         // netlist sans section .control
+    QString legend;       // correspondance nœud -> broches
     QStringList nodes;    // nœuds SPICE hors masse
+    QString error;
 };
 
 inline QString spiceValue(const SymbolItem *s, const QString &name, const QString &def)
 {
-    for (const Prop &p : s->props)
-        if (p.name == name && !p.value.isEmpty())
-            return p.value;
+    static const QRegularExpression ok("^[A-Za-z0-9.+_-]+$");
+    for (const Prop &p : s->props) {
+        if (p.name != name)
+            continue;
+        const QString v = p.value.trimmed();
+        return ok.match(v).hasMatch() ? v : def;
+    }
     return def;
 }
 
@@ -71,29 +76,52 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
 
     // 3. une ligne par composant
     QStringList lines, models;
+    static const QRegularExpression badChars("[^A-Za-z0-9_]");
     for (int c = 0; c < syms.size(); ++c) {
         SymbolItem *s = syms[c];
         const QString k = s->kind();
         if (k == "ground") continue;
 
-        QString name = s->ref.trimmed().replace(' ', '_');
+        QString name = s->ref;
+        name.remove(badChars);
+        if (name.isEmpty()) name = QString("X%1").arg(c);
         if (!name.startsWith(s->prefix(), Qt::CaseInsensitive))
             name = s->prefix() + name;
+        if (k == "opamp")
+            name = "E" + name;                  // source commandée en SPICE
 
-        const QString a = nodeOf(c, 0);
-        const QString b = nodeOf(c, 1);
+        QStringList n;
+        for (int i = 0; i < s->pinCount(); ++i)
+            n << nodeOf(c, i);
+
+        auto v = [&](const QString &key, const QString &def) { return spiceValue(s, key, def); };
 
         if (k == "resistor")
-            lines << QString("%1 %2 %3 %4").arg(name, a, b, spiceValue(s, "R", "1k"));
+            lines << QString("%1 %2 %3 %4").arg(name, n[0], n[1], v("R", "1k"));
         else if (k == "capacitor")
-            lines << QString("%1 %2 %3 %4 IC=%5")
-                         .arg(name, a, b, spiceValue(s, "C", "100n"), spiceValue(s, "V", "0"));
+            lines << QString("%1 %2 %3 %4 IC=%5").arg(name, n[0], n[1], v("C", "100n"), v("V", "0"));
+        else if (k == "inductor")
+            lines << QString("%1 %2 %3 %4 IC=%5").arg(name, n[0], n[1], v("L", "1m"), v("Ic", "0"));
         else if (k == "vsource")
-            lines << QString("%1 %2 %3 DC %4").arg(name, a, b, spiceValue(s, "U", "5"));
+            lines << QString("%1 %2 %3 DC %4").arg(name, n[0], n[1], v("U", "5"));
+        else if (k == "vsin")
+            lines << QString("%1 %2 %3 SIN(%4 %5 %6)")
+                         .arg(name, n[0], n[1], v("Voff", "0"), v("Vamp", "1"), v("Freq", "1k"));
+        else if (k == "vpulse")
+            lines << QString("%1 %2 %3 PULSE(%4)").arg(name, n[0], n[1],
+                                                       QStringList{v("V1", "0"), v("V2", "5"), v("Td", "0"), v("Tr", "1n"),
+                                                                   v("Tf", "1n"), v("Pw", "500u"), v("Per", "1m")}.join(' '));
         else if (k == "diode") {
-            lines << QString("%1 %2 %3 M_%1").arg(name, a, b);
-            models << QString(".model M_%1 D(Is=%2 N=%3)")
-                          .arg(name, spiceValue(s, "Is", "1e-15"), spiceValue(s, "N", "1"));
+            lines << QString("%1 %2 %3 M_%1").arg(name, n[0], n[1]);
+            models << QString(".model M_%1 D(Is=%2 N=%3)").arg(name, v("Is", "1e-15"), v("N", "1"));
+        } else if (k == "npn" || k == "pnp") {
+            // SPICE : Q collecteur base émetteur modèle
+            lines << QString("%1 %2 %3 %4 M_%1").arg(name, n[1], n[0], n[2]);
+            models << QString(".model M_%1 %2(Bf=%3 Is=%4)")
+                          .arg(name, k == "npn" ? "NPN" : "PNP", v("Bf", "100"), v("Is", "1e-14"));
+        } else if (k == "opamp") {
+            // E sortie 0 entrée+ entrée- gain
+            lines << QString("%1 %2 0 %3 %4 %5").arg(name, n[2], n[0], n[1], v("A", "1e6"));
         }
     }
     schema_free(sc);
@@ -109,11 +137,11 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
 
     r.body = "* Voltix\n" + lines.join("\n") + "\n" + models.join("\n") + "\n";
     r.netlist = r.body + ".control\nop\nprint all\n.endc\n.end\n";
-    for (auto it = node.cbegin(); it != node.cend(); ++it)
+
+    for (auto it = node.cbegin(); it != node.cend(); ++it) {
+        r.legend += QString("%1 : %2\n").arg(it.value(), members[it.key()].join(", "));
         if (it.value() != "0")
             r.nodes << it.value();
-
-    for (auto it = node.cbegin(); it != node.cend(); ++it)
-        r.legend += QString("%1 : %2\n").arg(it.value(), members[it.key()].join(", "));
+    }
     return r;
 }

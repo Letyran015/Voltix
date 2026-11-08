@@ -26,8 +26,12 @@ MainWindow::MainWindow(QWidget *parent)
     // Barre d'outils : choix du composant posé au double-clic
     auto *tb = addToolBar("Composants");
     auto *group = new QActionGroup(this);
-    const QStringList names = {"Résistance", "Condensateur", "Diode", "Source de tension", "Masse"};
-    const QStringList ids   = {"resistor", "capacitor", "diode", "vsource", "ground"};
+    const QStringList names = {"Résistance", "Condensateur", "Inductance", "Diode",
+                               "Source DC", "Source sinus", "Source impulsion",
+                               "NPN", "PNP", "Ampli-op", "Masse"};
+    const QStringList ids   = {"resistor", "capacitor", "inductor", "diode",
+                             "vsource", "vsin", "vpulse",
+                             "npn", "pnp", "opamp", "ground"};
     for (int i = 0; i < names.size(); ++i) {
         QAction *a = tb->addAction(names[i]);
         a->setCheckable(true);
