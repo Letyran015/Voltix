@@ -109,7 +109,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cmake --install build --config Release --prefix dist
+          cmake --install build --config Release --prefix "$GITHUB_WORKSPACE/dist"
           mkdir -p package
           (cd dist && 7z a ../package/Voltix-Windows.zip . > /dev/null)
 
@@ -117,7 +117,7 @@ jobs:
       - name: Paquet macOS
         if: runner.os == 'macOS'
         run: |
-          cmake --install build --config Release --prefix dist
+          cmake --install build --config Release --prefix "$GITHUB_WORKSPACE/dist"
           codesign --force --deep --sign - dist/Voltix.app
           mkdir -p package
           hdiutil create -volname Voltix -srcfolder dist/Voltix.app -ov -format UDZO package/Voltix-macOS.dmg
