@@ -13,6 +13,11 @@
 #include <QtMath>
 #include <algorithm>
 #include <QMessageBox>
+#include <QFile>
+#include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 static const int GRID = 20;
 
@@ -273,6 +278,159 @@ void SchemaView::dumpNets()
     qDebug().noquote() << text;
     QMessageBox::information(this, "Netlist", text);
     schema_free(sc);
+}
+
+void SchemaView::clearAll()
+{
+    finishWire();
+    scene()->clear();
+    m_total = 0;
+    m_counts.clear();
+}
+
+bool SchemaView::saveToFile(const QString &path)
+{
+    QList<SymbolItem *> syms;
+    QList<WireItem *> wires;
+    for (QGraphicsItem *it : scene()->items()) {
+        if (auto *s = dynamic_cast<SymbolItem *>(it)) syms << s;
+        else if (auto *w = dynamic_cast<WireItem *>(it)) wires << w;
+    }
+    std::sort(syms.begin(), syms.end(),
+              [](SymbolItem *a, SymbolItem *b) { return a->index < b->index; });
+
+    QHash<SymbolItem *, int> position;      // composant -> numéro dans le fichier
+    QJsonArray comps;
+    for (int i = 0; i < syms.size(); ++i) {
+        SymbolItem *s = syms[i];
+        position[s] = i;
+        QJsonObject o;
+        o["kind"] = s->kind();
+        o["ref"] = s->ref;
+        o["index"] = s->index;
+        o["x"] = s->pos().x();
+        o["y"] = s->pos().y();
+        o["rotation"] = s->rotation();
+        comps.append(o);
+    }
+
+    auto endToJson = [&](SymbolItem *s, int pin) {
+        QJsonObject e;
+        e["comp"] = position.value(s, -1);
+        e["pin"] = pin;
+        return e;
+    };
+
+    QJsonArray ws;
+    for (WireItem *w : std::as_const(wires)) {
+        QJsonArray pts;
+        for (const QPointF &p : w->points()) {
+            QJsonArray xy;
+            xy.append(p.x());
+            xy.append(p.y());
+            pts.append(xy);
+        }
+        QJsonObject o;
+        o["points"] = pts;
+        if (w->symA()) o["a"] = endToJson(w->symA(), w->pinA());
+        if (w->symB()) o["b"] = endToJson(w->symB(), w->pinB());
+        ws.append(o);
+    }
+
+    QJsonObject root;
+    root["format"] = "voltix";
+    root["version"] = 1;
+    root["components"] = comps;
+    root["wires"] = ws;
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return false;
+    f.write(QJsonDocument(root).toJson());
+    return true;
+}
+
+bool SchemaView::loadFromFile(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
+        return false;
+    const QJsonObject root = doc.object();
+    if (root["format"].toString() != "voltix")
+        return false;
+
+    clearAll();                             // le fichier est valide : on peut vider la scène
+
+    // 1. composants
+    QList<SymbolItem *> syms;
+    const QJsonArray comps = root["components"].toArray();
+    for (const QJsonValue &v : comps) {
+        const QJsonObject o = v.toObject();
+        SymbolItem *s = makeSymbol(o["kind"].toString());
+        if (!s) {                           // type inconnu : on garde la numérotation
+            syms << nullptr;
+            continue;
+        }
+        s->ref = o["ref"].toString();
+        s->index = o["index"].toInt();
+        s->setRotation(o["rotation"].toDouble());
+        s->setPos(o["x"].toDouble(), o["y"].toDouble());
+        scene()->addItem(s);
+        syms << s;
+
+        // on reprend les compteurs pour que les nouveaux noms restent uniques
+        m_total = qMax(m_total, s->index);
+        const int n = s->ref.mid(s->prefix().size()).toInt();
+        m_counts[s->prefix()] = qMax(m_counts.value(s->prefix()), n);
+    }
+
+    // 2. fils
+    auto endOf = [&](const QJsonValue &v, SymbolItem *&s, int &pin) {
+        s = nullptr;
+        pin = -1;
+        if (!v.isObject())
+            return;
+        const QJsonObject e = v.toObject();
+        const int c = e["comp"].toInt(-1);
+        if (c < 0 || c >= syms.size() || !syms[c])
+            return;
+        const int p = e["pin"].toInt(-1);
+        if (p < 0 || p >= syms[c]->pinCount())
+            return;
+        s = syms[c];
+        pin = p;
+    };
+
+    const QJsonArray ws = root["wires"].toArray();
+    for (const QJsonValue &v : ws) {
+        const QJsonObject o = v.toObject();
+        QPolygonF poly;
+        const QJsonArray pts = o["points"].toArray();
+        for (const QJsonValue &pv : pts) {
+            const QJsonArray xy = pv.toArray();
+            poly << QPointF(xy.at(0).toDouble(), xy.at(1).toDouble());
+        }
+        if (poly.size() < 2)
+            continue;
+
+        SymbolItem *sa, *sb;
+        int pa, pb;
+        endOf(o["a"], sa, pa);
+        endOf(o["b"], sb, pb);
+
+        auto *w = new WireItem;
+        w->setPoints(poly);
+        scene()->addItem(w);
+        w->setEnds(sa, pa, sb, pb);
+    }
+
+    if (!scene()->items().isEmpty())
+        centerOn(scene()->itemsBoundingRect().center());
+    return true;
 }
 
 void SchemaView::keyPressEvent(QKeyEvent *e)

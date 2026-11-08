@@ -20,6 +20,11 @@ public:
         if (m_b.sym) m_b.sym->detach(this);
     }
 
+    SymbolItem *symA() const { return m_a.sym; }
+    int pinA() const { return m_a.pin; }
+    SymbolItem *symB() const { return m_b.sym; }
+    int pinB() const { return m_b.pin; }
+
     void setPoints(const QPolygonF &p)
     {
         prepareGeometryChange();

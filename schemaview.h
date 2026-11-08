@@ -12,6 +12,9 @@ class SchemaView : public QGraphicsView
 public:
     explicit SchemaView(QWidget *parent = nullptr);
         void setKind(const QString &kind) { m_kind = kind; }
+        void clearAll();
+        bool saveToFile(const QString &path);
+        bool loadFromFile(const QString &path);
 
 protected:
     void drawBackground(QPainter *p, const QRectF &rect) override;

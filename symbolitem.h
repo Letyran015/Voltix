@@ -18,6 +18,7 @@ public:
     int index = 0;    // ordre de création
 
     virtual QString prefix() const = 0;
+    virtual QString kind() const = 0;
     virtual int pinCount() const = 0;
     virtual QPointF pinLocal(int i) const = 0;
     QPointF pinScene(int i) const { return mapToScene(pinLocal(i)); }
@@ -51,6 +52,7 @@ class ResistorItem : public SymbolItem
 {
 public:
     QString prefix() const override { return "R"; }
+    QString kind() const override { return "resistor"; }
     int pinCount() const override { return 2; }
     QPointF pinLocal(int i) const override { return i == 0 ? QPointF(-40, 0) : QPointF(40, 0); }
     QRectF boundingRect() const override { return QRectF(-44, -10, 88, 20); }
@@ -68,6 +70,7 @@ class CapacitorItem : public SymbolItem
 {
 public:
     QString prefix() const override { return "C"; }
+    QString kind() const override { return "capacitor"; }
     int pinCount() const override { return 2; }
     QPointF pinLocal(int i) const override { return i == 0 ? QPointF(-40, 0) : QPointF(40, 0); }
     QRectF boundingRect() const override { return QRectF(-44, -18, 88, 36); }
@@ -86,6 +89,7 @@ class DiodeItem : public SymbolItem
 {
 public:
     QString prefix() const override { return "D"; }
+    QString kind() const override { return "diode"; }
     int pinCount() const override { return 2; }
     QPointF pinLocal(int i) const override { return i == 0 ? QPointF(-40, 0) : QPointF(40, 0); }
     QRectF boundingRect() const override { return QRectF(-44, -16, 88, 32); }
@@ -104,6 +108,7 @@ class VoltageSourceItem : public SymbolItem
 {
 public:
     QString prefix() const override { return "V"; }
+    QString kind() const override { return "vsource"; }
     int pinCount() const override { return 2; }
     QPointF pinLocal(int i) const override { return i == 0 ? QPointF(-40, 0) : QPointF(40, 0); }
     QRectF boundingRect() const override { return QRectF(-44, -24, 88, 48); }
@@ -124,6 +129,7 @@ class GroundItem : public SymbolItem
 {
 public:
     QString prefix() const override { return "GND"; }
+    QString kind() const override { return "ground"; }
     int pinCount() const override { return 1; }
     QPointF pinLocal(int) const override { return QPointF(0, 0); }
     QRectF boundingRect() const override { return QRectF(-18, -6, 36, 34); }
