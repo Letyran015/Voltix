@@ -2,11 +2,14 @@
 
 #include <QApplication>
 #include <QLocale>
+#include <QStringList>
 #include <QTranslator>
 
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
+    QCoreApplication::setOrganizationName("Voltix");
+    QCoreApplication::setApplicationName("Voltix");
 
     QTranslator translator;
     const QStringList uiLanguages = QLocale::system().uiLanguages();
@@ -17,7 +20,13 @@ int main(int argc, char *argv[])
             break;
         }
     }
+
     MainWindow w;
     w.show();
-    return QApplication::exec();
+
+    const QStringList args = QCoreApplication::arguments();
+    if (args.size() > 1 && args[1].endsWith(".voltix", Qt::CaseInsensitive))
+        w.openPath(args[1]);
+
+    return a.exec();
 }

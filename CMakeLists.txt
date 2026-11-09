@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.19)
-project(Voltix VERSION 0.1 LANGUAGES C CXX)
+project(Voltix LANGUAGES C CXX)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets LinguistTools)
+# Version : "0.0.0-dev" en local ; le workflow la remplace par celle du tag (v0.1.0 -> 0.1.0)
+set(VOLTIX_VERSION "0.0.0-dev" CACHE STRING "Version de Voltix")
+
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Network LinguistTools)
 
 qt_standard_project_setup()
 
@@ -21,6 +24,7 @@ qt_add_executable(Voltix
     propertiesdialog.h
     plotwidget.h
     spice.h
+    updatechecker.h
 )
 
 qt_add_translations(
@@ -32,10 +36,12 @@ target_link_libraries(Voltix
     PRIVATE
         Qt::Core
         Qt::Widgets
+        Qt::Network
 )
 
+target_compile_definitions(Voltix PRIVATE VOLTIX_VERSION="${VOLTIX_VERSION}")
+
 if(MSVC)
-    # sources en UTF-8 (accents, µ, Ω, °) et constantes M_PI
     target_compile_options(Voltix PRIVATE /utf-8)
     target_compile_definitions(Voltix PRIVATE _USE_MATH_DEFINES)
 endif()
@@ -73,7 +79,6 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/licenses)
             DESTINATION ${VOLTIX_DATA_DIR}/licenses)
 endif()
 
-# Windows et macOS : déploiement automatique de Qt (Linux : AppImage, voir le workflow)
 if(WIN32 OR APPLE)
     qt_generate_deploy_app_script(
         TARGET Voltix

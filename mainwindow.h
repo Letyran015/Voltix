@@ -22,6 +22,8 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+    bool openPath(const QString &path);     // ouvre un fichier .voltix
+
 protected:
     void closeEvent(QCloseEvent *e) override;
 

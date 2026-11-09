@@ -67,7 +67,7 @@ jobs:
         if: runner.os == 'Windows' && steps.ngcache.outputs.cache-hit != 'true'
         shell: bash
         env:
-          EXPECTED_SHA256: ""   # à renseigner après le premier build réussi
+          EXPECTED_SHA256: ""   # à renseigner depuis les journaux d'un build réussi
         run: |
           set -euo pipefail
           curl -fL --retry 3 -o ngspice.7z \
@@ -84,7 +84,7 @@ jobs:
         if: runner.os != 'Windows' && steps.ngcache.outputs.cache-hit != 'true'
         shell: bash
         env:
-          EXPECTED_SHA256: ""   # à renseigner après le premier build réussi
+          EXPECTED_SHA256: ""   # à renseigner depuis les journaux d'un build réussi
         run: |
           set -euo pipefail
           curl -fL --retry 3 -o ngspice.tar.gz \
@@ -103,17 +103,33 @@ jobs:
       - name: Configuration et compilation
         shell: bash
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          VER="0.0.0-dev"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then VER="${GITHUB_REF_NAME#v}"; fi
+          echo "Version : $VER"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVOLTIX_VERSION="$VER"
           cmake --build build --config Release --parallel
 
       # ---------- Windows ----------
-      - name: Paquet Windows
+      - name: Paquet Windows (zip portable)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           cmake --install build --config Release --prefix "$GITHUB_WORKSPACE/dist"
           mkdir -p package
           (cd dist && 7z a ../package/Voltix-Windows.zip . > /dev/null)
+
+      - name: Installateur Windows (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          $ver = "0.0.0"
+          if ($env:GITHUB_REF_TYPE -eq "tag") { $ver = $env:GITHUB_REF_NAME.TrimStart("v") }
+          & $iscc "/DMyAppVersion=$ver" "/DSourceDir=$env:GITHUB_WORKSPACE\dist" "/DOutputDir=$env:GITHUB_WORKSPACE\package" "packaging\voltix.iss"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       # ---------- macOS ----------
       - name: Paquet macOS
@@ -128,7 +144,7 @@ jobs:
       - name: Paquet Linux
         if: runner.os == 'Linux'
         run: |
-          printf '[Desktop Entry]\nType=Application\nName=Voltix\nComment=Editeur de schemas electroniques avec simulation\nExec=Voltix\nIcon=voltix\nCategories=Engineering;Electronics;\n' > voltix.desktop
+          printf '[Desktop Entry]\nType=Application\nName=Voltix\nComment=Editeur de schemas electroniques avec simulation\nExec=Voltix\nIcon=voltix\nCategories=Engineering;Electronics;\nMimeType=application/x-voltix;\n' > voltix.desktop
           [ -f packaging/voltix.png ] || convert -size 256x256 xc:'#1e6fd9' packaging/voltix.png
           cmake --install build --prefix AppDir/usr
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage

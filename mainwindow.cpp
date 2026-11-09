@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "schemaview.h"
+#include "updatechecker.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -11,7 +12,9 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSettings>
 #include <QStringList>
+#include <QTimer>
 #include <QToolBar>
 
 MainWindow::MainWindow(QWidget *parent)
@@ -67,18 +70,32 @@ MainWindow::MainWindow(QWidget *parent)
     sm->addAction("Analyse &AC (Bode)…", QKeySequence(Qt::Key_F8), this,
                   [view] { view->simulateAC(); });
 
+    // Menu Aide + mises à jour
+    auto *updater = new UpdateChecker(this);
+    QMenu *hm = menuBar()->addMenu("&Aide");
+    hm->addAction("Rechercher des mises à jour…", this, [updater] { updater->check(true); });
+
+    QAction *autoAct = hm->addAction("Vérifier automatiquement les mises à jour");
+    autoAct->setCheckable(true);
+    autoAct->setChecked(QSettings().value("update/auto", true).toBool());
+    connect(autoAct, &QAction::toggled, this,
+            [](bool on) { QSettings().setValue("update/auto", on); });
+
+    hm->addSeparator();
+    hm->addAction("À &propos de Voltix", this, [this] {
+        QMessageBox::about(this, "À propos de Voltix",
+                           "<b>Voltix</b> " + UpdateChecker::currentVersion() + "<br>"
+                                                                                "Éditeur de schémas avec simulation.<br><br>"
+                                                                                "Simulation : <a href='https://ngspice.sourceforge.io'>ngspice</a> (licence BSD).<br>"
+                                                                                "Interface : <a href='https://www.qt.io'>Qt</a> (LGPL).<br>"
+                                                                                "Les textes de licence sont dans le dossier « licenses ».");
+    });
+
     connect(view, &SchemaView::stateChanged, this, &MainWindow::updateState);
     updateState();
 
-    // Menu Aide
-    QMenu *hm = menuBar()->addMenu("&Aide");
-    hm->addAction("À &propos de Voltix", this, [this] {
-        QMessageBox::about(this, "À propos de Voltix",
-                           "<b>Voltix</b> : éditeur de schémas avec simulation.<br><br>"
-                           "Simulation : <a href='https://ngspice.sourceforge.io'>ngspice</a> (licence BSD).<br>"
-                           "Interface : <a href='https://www.qt.io'>Qt</a> (LGPL).<br>"
-                           "Les textes de licence sont dans le dossier « licenses ».");
-    });
+    // vérification silencieuse peu après le démarrage
+    QTimer::singleShot(3000, this, [updater] { updater->check(false); });
 }
 
 MainWindow::~MainWindow()
@@ -123,20 +140,25 @@ void MainWindow::newFile()
     updateState();
 }
 
-void MainWindow::openFile()
+bool MainWindow::openPath(const QString &path)
 {
     if (!maybeSave())
-        return;
+        return false;
+    if (!m_view->loadFromFile(path)) {
+        QMessageBox::warning(this, "Voltix", "Impossible de lire ce fichier.");
+        return false;
+    }
+    m_path = path;
+    updateState();
+    return true;
+}
+
+void MainWindow::openFile()
+{
     const QString p = QFileDialog::getOpenFileName(this, "Ouvrir un schéma", QString(),
                                                    "Schéma Voltix (*.voltix)");
-    if (p.isEmpty())
-        return;
-    if (!m_view->loadFromFile(p)) {
-        QMessageBox::warning(this, "Voltix", "Impossible de lire ce fichier.");
-        return;
-    }
-    m_path = p;
-    updateState();
+    if (!p.isEmpty())
+        openPath(p);
 }
 
 bool MainWindow::saveFile()
