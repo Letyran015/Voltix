@@ -426,6 +426,7 @@ protected:
                                   QPointF(34, 7), QPointF(18, 7)}));
     }
 };
+SymbolItem *makeElectroSymbol(const QString &kind);   // défini dans electro.cpp
 
 inline SymbolItem *makeSymbol(const QString &kind)
 {
@@ -446,5 +447,5 @@ inline SymbolItem *makeSymbol(const QString &kind)
     if (kind == "pnp")       return new BjtItem(true);
     if (kind == "opamp")     return new OpAmpItem;
     if (kind == "ground")    return new GroundItem;
-    return nullptr;
+    return makeElectroSymbol(kind);
 }

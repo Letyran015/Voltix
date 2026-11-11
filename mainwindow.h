@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QList>
 #include <QMainWindow>
 #include <QString>
 
@@ -11,6 +12,10 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class SchemaView;
+class WelcomePage;
+class LibraryPanel;
+class QStackedWidget;
+class QDockWidget;
 class QAction;
 class QCloseEvent;
 
@@ -30,10 +35,18 @@ protected:
 private:
     Ui::MainWindow *ui;
     SchemaView *m_view = nullptr;
+    WelcomePage *m_welcome = nullptr;
+    LibraryPanel *m_lib = nullptr;
+    QStackedWidget *m_stack = nullptr;
+    QDockWidget *m_dock = nullptr;
     QString m_path;
+    int m_module = 1;
     QAction *m_undoAct = nullptr;
     QAction *m_redoAct = nullptr;
+    QList<QAction *> m_modActs;
 
+    void enterModule(int module);
+    void showWelcome();
     void updateState();
     bool maybeSave();
     void newFile();

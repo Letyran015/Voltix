@@ -32,6 +32,7 @@ public:
     void simulateTran();      // transitoire
     void simulateSweep();     // balayage DC
     void simulateAC();        // analyse AC (Bode)
+    void verifyElectrical();  // vérification des repères et des connexions
 
 signals:
     void stateChanged();      // historique ou état « modifié » changé

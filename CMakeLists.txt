@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.19)
 project(Voltix LANGUAGES C CXX)
 
-# Version : "0.0.0-dev" en local ; le workflow la remplace par celle du tag (v0.1.0 -> 0.1.0)
 set(VOLTIX_VERSION "0.0.0-dev" CACHE STRING "Version de Voltix")
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Network LinguistTools)
@@ -18,6 +17,7 @@ qt_add_executable(Voltix
     core.c
     symbolitem.h
     symbolitem.cpp
+    electro.cpp
     wireitem.h
     schemaview.h
     schemaview.cpp
@@ -25,7 +25,19 @@ qt_add_executable(Voltix
     plotwidget.h
     spice.h
     updatechecker.h
+    catalog.h
+    librarypanel.h
+    welcomepage.h
 )
+
+# images facultatives des cartes d'accueil : resources/electronique.jpg, etc.
+file(GLOB VOLTIX_IMAGES "${CMAKE_SOURCE_DIR}/resources/*.jpg" "${CMAKE_SOURCE_DIR}/resources/*.png")
+if(VOLTIX_IMAGES)
+    qt_add_resources(Voltix "images"
+        PREFIX "/img"
+        BASE "${CMAKE_SOURCE_DIR}/resources"
+        FILES ${VOLTIX_IMAGES})
+endif()
 
 qt_add_translations(
     TARGETS Voltix

@@ -131,7 +131,10 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
     for (int c = 0; c < syms.size(); ++c) {
         SymbolItem *s = syms[c];
         const QString k = s->kind();
-        if (k == "ground" || k == "label") continue;
+        static const QSet<QString> simulated = {"resistor", "capacitor", "inductor", "vsource",
+                                                "vsin", "vpulse", "diode", "npn", "pnp", "opamp",
+                                                "transformer"};
+        if (!simulated.contains(k)) continue;      // masse, étiquettes, électrotechnique
 
         QString name = s->ref;
         name.remove(badChars);
@@ -151,6 +154,11 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
             lines << QString("%1 %2 %3 %4").arg(name, n[0], n[1], v("R", "1k"));
         else if (k == "capacitor")
             lines << QString("%1 %2 %3 %4 IC=%5").arg(name, n[0], n[1], v("C", "100n"), v("V", "0"));
+        else if (k == "transformer") {
+            lines << QString("L%1p %2 %3 %4").arg(name, n[0], n[1], v("Lp", "10m"));
+            lines << QString("L%1s %2 %3 %4").arg(name, n[2], n[3], v("Ls", "10m"));
+            lines << QString("K%1 L%1p L%1s %2").arg(name, v("k", "0.99"));
+        }
         else if (k == "inductor")
             lines << QString("%1 %2 %3 %4 IC=%5").arg(name, n[0], n[1], v("L", "1m"), v("Ic", "0"));
         else if (k == "vsource") {

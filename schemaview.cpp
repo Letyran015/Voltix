@@ -38,6 +38,8 @@
 #include <QDir>
 #include <QListWidget>
 
+#include <QSet>
+
 static const int GRID = 20;
 
 static QPointF snap(const QPointF &p)
@@ -571,6 +573,77 @@ void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
         return;
     }
     QGraphicsView::mouseDoubleClickEvent(e);
+}
+
+static QString propOf(const SymbolItem *s, const QString &name)
+{
+    for (const Prop &p : s->props)
+        if (p.name == name)
+            return p.value.trimmed();
+    return QString();
+}
+
+void SchemaView::verifyElectrical()
+{
+    QList<SymbolItem *> syms;
+    QList<WireItem *> wires;
+    collect(syms, wires);
+
+    QSet<QString> coils, contactors, thermals, used;
+    QStringList issues;
+
+    for (const SymbolItem *s : std::as_const(syms)) {
+        const QString k = s->kind(), r = s->ref.trimmed().toLower();
+        if (k == "coil" || k == "relay") {
+            if (coils.contains(r))
+                issues << QString("Bobine « %1 » en double.").arg(s->ref);
+            coils << r;
+        } else if (k == "contactor3") {
+            contactors << r;
+        } else if (k == "thermal3") {
+            thermals << r;
+        }
+    }
+
+    for (const SymbolItem *s : std::as_const(syms)) {
+        const QString k = s->kind();
+        if (k != "contact_no" && k != "contact_nc" && k != "thermal_nc")
+            continue;
+        const QString ref = propOf(s, "Bobine").toLower();
+        if (ref.isEmpty()) {
+            issues << QString("Contact sans bobine associée (%1).").arg(s->ref);
+            continue;
+        }
+        const bool ok = (k == "thermal_nc") ? thermals.contains(ref) : coils.contains(ref);
+        if (!ok)
+            issues << QString("Contact « %1 » : aucun repère « %2 » dans le schéma.")
+                          .arg(s->ref, propOf(s, "Bobine"));
+        used << ref;
+    }
+
+    for (const SymbolItem *s : std::as_const(syms)) {
+        const QString k = s->kind(), r = s->ref.trimmed().toLower();
+        if ((k == "coil" || k == "relay") && !used.contains(r) && !contactors.contains(r))
+            issues << QString("Bobine « %1 » : aucun contact ni pôle de puissance associé.")
+                          .arg(s->ref);
+        if (k == "thermal3" && !used.contains(r))
+            issues << QString("Relais thermique « %1 » : aucun contact thermique associé.")
+                          .arg(s->ref);
+    }
+
+    Schema *sc = buildSchema(syms, wires);
+    QStringList floating;
+    for (int c = 0; c < syms.size(); ++c)
+        for (int i = 0; i < syms[c]->pinCount(); ++i)
+            if (schema_pin_net(sc, c, i) < 0)
+                floating << QString("%1.%2").arg(syms[c]->ref).arg(i + 1);
+    schema_free(sc);
+    if (!floating.isEmpty())
+        issues << "Broches non connectées : " + floating.join(", ");
+
+    QMessageBox::information(this, "Vérification du schéma",
+                             issues.isEmpty() ? QString("Aucun problème détecté.")
+                                              : issues.join("\n"));
 }
 
 void SchemaView::keyPressEvent(QKeyEvent *e)

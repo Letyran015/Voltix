@@ -1,11 +1,15 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "catalog.h"
+#include "librarypanel.h"
 #include "schemaview.h"
 #include "updatechecker.h"
+#include "welcomepage.h"
 
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
+#include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeySequence>
@@ -13,38 +17,43 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QSettings>
+#include <QStackedWidget>
+#include <QStatusBar>
 #include <QStringList>
 #include <QTimer>
-#include <QToolBar>
+
+static const int kMods[3] = {ModElectronics, ModElectrotech, ModElectromag};
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+    resize(1200, 760);
 
     auto *view = new SchemaView(this);
     m_view = view;
-    setCentralWidget(view);
+    m_welcome = new WelcomePage(this);
+    m_stack = new QStackedWidget(this);
+    m_stack->addWidget(m_welcome);
+    m_stack->addWidget(view);
+    setCentralWidget(m_stack);
 
-    // Barre d'outils : choix du composant posé au double-clic
-    auto *tb = addToolBar("Composants");
-    auto *group = new QActionGroup(this);
-    const QStringList names = {"Résistance", "Condensateur", "Inductance", "Diode",
-                               "Source DC", "Source sinus", "Source impulsion",
-                               "NPN", "PNP", "Ampli-op", "Masse", "Étiquette"};
-    const QStringList ids   = {"resistor", "capacitor", "inductor", "diode",
-                             "vsource", "vsin", "vpulse",
-                             "npn", "pnp", "opamp", "ground", "label"};
-    for (int i = 0; i < names.size(); ++i) {
-        QAction *a = tb->addAction(names[i]);
-        a->setCheckable(true);
-        group->addAction(a);
-        if (i == 0)
-            a->setChecked(true);
-        const QString id = ids[i];
-        connect(a, &QAction::triggered, this, [view, id] { view->setKind(id); });
-    }
+    // Bibliothèque (panneau de gauche)
+    m_lib = new LibraryPanel;
+    m_lib->setMinimumWidth(240);
+    m_lib->onPick = [this, view](const QString &id) {
+        view->setKind(id);
+        statusBar()->showMessage(
+            QString("%1 : double-cliquez dans le schéma pour le poser.").arg(entryName(id)));
+    };
+    m_dock = new QDockWidget("Bibliothèque", this);
+    m_dock->setObjectName("library");
+    m_dock->setWidget(m_lib);
+    addDockWidget(Qt::LeftDockWidgetArea, m_dock);
+    m_dock->hide();
+
+    m_welcome->onChoose = [this](int m) { enterModule(m); };
 
     // Menu Fichier
     QMenu *fm = menuBar()->addMenu("&Fichier");
@@ -53,11 +62,35 @@ MainWindow::MainWindow(QWidget *parent)
     fm->addSeparator();
     fm->addAction("&Enregistrer", QKeySequence::Save, this, &MainWindow::saveFile);
     fm->addAction("Enregistrer &sous…", QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
+    fm->addSeparator();
+    fm->addAction("Écran d'&accueil", this, [this] { showWelcome(); });
 
     // Menu Édition
     QMenu *em = menuBar()->addMenu("&Édition");
     m_undoAct = em->addAction("&Annuler", QKeySequence::Undo, this, [view] { view->undo(); });
     m_redoAct = em->addAction("&Rétablir", QKeySequence::Redo, this, [view] { view->redo(); });
+
+    // Menu Affichage : module, bibliothèque, accueil
+    QMenu *vm = menuBar()->addMenu("&Affichage");
+    QMenu *mm = vm->addMenu("&Module");
+    auto *mg = new QActionGroup(this);
+    for (int i = 0; i < 3; ++i) {
+        QAction *a = mm->addAction(moduleTitle(kMods[i]));
+        a->setCheckable(true);
+        mg->addAction(a);
+        m_modActs << a;
+        const int m = kMods[i];
+        connect(a, &QAction::triggered, this, [this, m] { enterModule(m); });
+    }
+    QAction *dockAct = m_dock->toggleViewAction();
+    dockAct->setText("Panneau &bibliothèque");
+    vm->addAction(dockAct);
+    vm->addSeparator();
+    QAction *welcomeAct = vm->addAction("Afficher l'écran d'accueil au démarrage");
+    welcomeAct->setCheckable(true);
+    welcomeAct->setChecked(QSettings().value("ui/welcome", true).toBool());
+    connect(welcomeAct, &QAction::toggled, this,
+            [](bool on) { QSettings().setValue("ui/welcome", on); });
 
     // Menu Simulation
     QMenu *sm = menuBar()->addMenu("&Simulation");
@@ -69,6 +102,11 @@ MainWindow::MainWindow(QWidget *parent)
                   [view] { view->simulateSweep(); });
     sm->addAction("Analyse &AC (Bode)…", QKeySequence(Qt::Key_F8), this,
                   [view] { view->simulateAC(); });
+
+    // Menu Outils
+    QMenu *tm = menuBar()->addMenu("&Outils");
+    tm->addAction("&Vérifier le schéma électrique", QKeySequence(Qt::Key_F9), this,
+                  [view] { view->verifyElectrical(); });
 
     // Menu Aide + mises à jour
     auto *updater = new UpdateChecker(this);
@@ -94,13 +132,42 @@ MainWindow::MainWindow(QWidget *parent)
     connect(view, &SchemaView::stateChanged, this, &MainWindow::updateState);
     updateState();
 
-    // vérification silencieuse peu après le démarrage
+    // démarrage : écran d'accueil, ou directement le dernier module
+    QSettings s;
+    m_module = s.value("ui/module", ModElectronics).toInt();
+    if (m_module != ModElectronics && m_module != ModElectrotech && m_module != ModElectromag)
+        m_module = ModElectronics;
+    if (s.value("ui/welcome", true).toBool())
+        showWelcome();
+    else
+        enterModule(m_module);
+
     QTimer::singleShot(3000, this, [updater] { updater->check(false); });
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
+}
+
+void MainWindow::enterModule(int module)
+{
+    m_module = module;
+    QSettings().setValue("ui/module", module);
+    for (int i = 0; i < m_modActs.size() && i < 3; ++i)
+        m_modActs[i]->setChecked(kMods[i] == module);
+    m_stack->setCurrentWidget(m_view);
+    m_dock->show();
+    m_lib->setModule(module);
+    m_view->setFocus();
+}
+
+void MainWindow::showWelcome()
+{
+    m_dock->hide();
+    m_stack->setCurrentWidget(m_welcome);
+    statusBar()->clearMessage();
+    m_welcome->setFocus();
 }
 
 void MainWindow::updateState()
@@ -149,6 +216,8 @@ bool MainWindow::openPath(const QString &path)
         return false;
     }
     m_path = path;
+    if (m_stack->currentWidget() != m_view)       // ouvert depuis l'accueil : on passe à l'éditeur
+        enterModule(m_module);
     updateState();
     return true;
 }

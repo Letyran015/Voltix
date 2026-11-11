@@ -59,9 +59,9 @@ public:
 
 private:
     static constexpr const char *kApi =
-        "https://api.github.com/repos/romeocourtel-tech/Voltix/releases/latest";
+        "https://api.github.com/repos/Letyran015/Voltix/releases/latest";
     static constexpr const char *kPage =
-        "https://github.com/romeocourtel-tech/Voltix/releases/latest";
+        "https://github.com/Letyran015/Voltix/releases/latest";
 
     static QList<int> parts(QString v)
     {
