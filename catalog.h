@@ -59,6 +59,9 @@ inline const QList<CatalogEntry> &catalog()
                                   {"ground",  "Masse",             "Sources et repères", ModAll},
                                   {"label",   "Étiquette de nœud", "Sources et repères", ModAll},
 
+                                  {"vmeter",  "Voltmètre",         "Mesure", ModAll},
+                                  {"ammeter", "Ampèremètre",       "Mesure", ModAll},
+
                                   {"diode", "Diode",          "Semi-conducteurs", ModElectronics},
                                   {"npn",   "Transistor NPN", "Semi-conducteurs", ModElectronics},
                                   {"pnp",   "Transistor PNP", "Semi-conducteurs", ModElectronics},

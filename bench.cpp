@@ -1,4 +1,5 @@
 #include "bench.h"
+#include <memory>
 #include <QPainter>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSceneWheelEvent>
@@ -13,6 +14,12 @@
 #include <QLabel>
 #include <QComboBox>
 #include <QAction>
+#include <QFile>
+#include <QFileDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMessageBox>
 #include <QShowEvent>
 #include <QWheelEvent>
 #include <QGraphicsSimpleTextItem>
@@ -66,6 +73,7 @@ BenchWire::BenchWire(BenchSocket *a_, BenchSocket *b_, const QColor &col) : a(a_
 
 BenchWire::~BenchWire()
 {
+    { std::vector<BenchModule *> cs = clamps; clamps.clear(); for (BenchModule *m : cs) m->onWireRemoved(this); }
     for (BenchSocket *s : {a, b}) {
         auto &v = s->wires;
         v.erase(std::remove(v.begin(), v.end(), this), v.end());
@@ -79,6 +87,45 @@ void BenchWire::updatePath()
     QPainterPath path(p1);
     path.cubicTo(p1 + QPointF(0, sag), p2 + QPointF(0, sag), p2);
     setPath(path);
+}
+
+QPainterPath BenchWire::shape() const
+{
+    QPainterPathStroker st; st.setWidth(14);
+    return st.createStroke(path());
+}
+
+QRectF BenchWire::boundingRect() const { return QGraphicsPathItem::boundingRect().adjusted(-22, -22, 22, 22); }
+
+void BenchWire::paint(QPainter *p, const QStyleOptionGraphicsItem *o, QWidget *w)
+{
+    QGraphicsPathItem::paint(p, o, w);
+    if (clamped) {
+        const QPointF m = path().pointAtPercent(0.5);
+        p->setBrush(Qt::NoBrush);
+        p->setPen(QPen(QColor(25, 25, 28), 9));
+        p->drawEllipse(m, 11, 11);
+        p->setPen(QPen(QColor(60, 190, 90), 4));
+        p->drawEllipse(m, 11, 11);
+    }
+}
+
+BenchJaw::BenchJaw(BenchModule *m, QPointF pos, double r) : QGraphicsEllipseItem(-r, -r, 2 * r, 2 * r, m), module(m)
+{
+    setPos(pos);
+    setZValue(2);
+    setToolTip(QStringLiteral("Anneau de la pince : cliquez dessus, puis cliquez sur un fil pour l'enserrer. Re-cliquez pour la retirer."));
+}
+
+void BenchJaw::paint(QPainter *p, const QStyleOptionGraphicsItem *, QWidget *)
+{
+    const double r = rect().width() / 2;
+    const bool on = module->clampedWire() != nullptr;
+    p->setBrush(Qt::NoBrush);
+    p->setPen(QPen(QColor(70, 72, 78), 3));
+    p->drawEllipse(QPointF(0, 0), r, r);
+    if (on) { p->setPen(QPen(QColor(60, 190, 90), 4)); p->drawEllipse(QPointF(0, 0), r - 5, r - 5); }
+    else { p->setPen(QPen(QColor(200, 60, 60), 2, Qt::DashLine)); p->drawEllipse(QPointF(0, 0), r - 5, r - 5); }
 }
 
 // =====================================================================================
@@ -103,12 +150,16 @@ void BenchModule::paint(QPainter *p, const QStyleOptionGraphicsItem *, QWidget *
     QColor border = !warn.isEmpty() ? QColor(210, 40, 40) : (isSelected() ? QColor(40, 110, 220) : QColor(70, 70, 70));
     p->setPen(QPen(border, !warn.isEmpty() || isSelected() ? 3 : 1.5));
     p->setBrush(body);
-    p->drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 8, 8);
+    {
+        const QPainterPath bp = bodyPath();
+        if (bp.isEmpty()) p->drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 8, 8);
+        else p->drawPath(bp);
+    }
 
     QColor txt = body.lightness() < 120 ? QColor(240, 240, 240) : QColor(25, 25, 25);
     p->setPen(txt);
     QFont f = p->font(); f.setPointSize(9); f.setBold(true); p->setFont(f);
-    p->drawText(QRectF(6, 4, w - 12, 18), Qt::AlignCenter, title);
+    p->drawText(QRectF(6, titleY(), w - 12, 18), Qt::AlignCenter, title);
 
     f.setBold(false); f.setPointSize(7); p->setFont(f);
     for (BenchSocket *s : sockets)
@@ -197,6 +248,28 @@ BenchSocket *BenchScene::socketAt(QPointF p) const
 void BenchScene::mousePressEvent(QGraphicsSceneMouseEvent *e)
 {
     if (e->button() == Qt::LeftButton) {
+        if (pendingClamp) {
+            BenchModule *pc = pendingClamp;
+            pendingClamp = nullptr;
+            for (QGraphicsItem *it : items(e->scenePos()))
+                if (auto *w = dynamic_cast<BenchWire *>(it)) {
+                    pc->clampTo(w);
+                    if (onHint) onHint(QStringLiteral("Pince posee sur le fil."));
+                    if (onClampChanged) onClampChanged();
+                    e->accept();
+                    return;
+                }
+            if (onHint) onHint(QStringLiteral("Pose de la pince annulee."));
+        }
+        for (QGraphicsItem *it : items(e->scenePos()))
+            if (auto *j = dynamic_cast<BenchJaw *>(it)) {
+                BenchModule *m = j->module;
+                if (m->clampedWire()) { m->clampTo(nullptr); if (onClampChanged) onClampChanged(); }
+                else { pendingClamp = m; if (onHint) onHint(QStringLiteral("Cliquez maintenant sur le fil a enserrer.")); }
+                j->update();
+                e->accept();
+                return;
+            }
         if (BenchSocket *s = socketAt(e->scenePos())) {
             from = s;
             temp = addLine(QLineF(s->center(), e->scenePos()), QPen(QColor(90, 90, 90), 3, Qt::DashLine));
@@ -367,7 +440,7 @@ public:
                    {"Courant permanent", "A", 0.1, 50, 13, 0.5, 1} };
     }
     bcplx z() const { return bcplx(params[1].value, PI2 * BenchWindow::kFreq * params[0].value); }
-    void elements(std::vector<BenchElem> &e) override { e.push_back({a, b, 1.0 / z()}); }
+    void elements(std::vector<BenchElem> &e) override { e.push_back({a, b, 1.0 / z(), 1.0 / std::max(params[1].value, 1e-3)}); }
     void post(const BenchSolution &s) override {
         double i = std::abs((s.at(a) - s.at(b)) / z());
         warn = i > params[2].value * 1.001 ? QStringLiteral("SURCHARGE %1 A").arg(fmt(i, 1)) : QString();
@@ -392,7 +465,7 @@ public:
     }
     void elements(std::vector<BenchElem> &e) override {
         for (int k = 0; k < 3; ++k)
-            e.push_back({s[k][0], s[k][1], bcplx(0, PI2 * BenchWindow::kFreq * params[k].value * 1e-6)});
+            e.push_back({s[k][0], s[k][1], bcplx(0, PI2 * BenchWindow::kFreq * params[k].value * 1e-6), 0.0});
     }
     BenchSocket *s[3][2];
 };
@@ -431,6 +504,8 @@ public:
         so   = addSocket("Sortie osc.", QColor(150, 150, 155), 285, 160);
         params = { {"Sensibilite de la sortie oscillo", "V/A", 0.001, 10, 0.1, 0.05, 3} };
         so->source = [this](const BenchSolution &s) { return (s.at(iin) - s.at(iout)) / kShunt * params[0].value; };
+        so->scale = [this] { return 1.0 / params[0].value; };
+        so->unit = "A";
     }
     void elements(std::vector<BenchElem> &e) override { e.push_back({iin, iout, 1.0 / kShunt}); }   // pince = 1 mohm serie
     void post(const BenchSolution &s) override {
@@ -469,6 +544,9 @@ public:
         out = addSocket("Sortie", QColor(150, 150, 155), 165, 100);
         params = { {"Rapport d'attenuation (V/V)", "", 1, 2000, 100, 10, 0} };
         out->source = [this](const BenchSolution &s) { return (s.at(p) - s.at(m)) / params[0].value; };
+        out->sourceDc = [this](const BenchSolution &s) { return (s.dcAt(p) - s.dcAt(m)) / params[0].value; };
+        out->scale = [this] { return params[0].value; };
+        out->unit = "V";
     }
     void paintExtra(QPainter *g) override {
         g->setPen(QColor(235, 235, 235));
@@ -485,27 +563,38 @@ public:
         c1  = addSocket("CH1", QColor(235, 205, 60), 90, 394);
         c2  = addSocket("CH2", QColor(60, 200, 220), 180, 394);
         gnd = addSocket("Masse", cBlack, 270, 394);
-        params = { {"CH1 : volts par division", "V", 0.001, 1000, 1, 0.5, 3},
-                   {"CH2 : volts par division", "V", 0.001, 1000, 0.1, 0.05, 3},
+        params = { {"CH1 : sensibilite par division (V ou A selon la sonde)", "", 0.001, 1000, 100, 10, 3},
+                   {"CH2 : sensibilite par division (V ou A selon la sonde)", "", 0.001, 1000, 0.5, 0.1, 3},
                    {"Base de temps", "ms/div", 0.1, 100, 5, 1, 1} };
         wheelParam = 2;
     }
     bool on1() const { return !c1->wires.empty(); }
     bool on2() const { return !c2->wires.empty(); }
-    bcplx read(const BenchSolution &s, BenchSocket *c) const {
-        bcplx ref = gnd->wires.empty() ? bcplx(0, 0) : s.at(gnd);
-        bcplx v = s.at(c) - ref;
+    void read(const BenchSolution &s, BenchSocket *c, bcplx &ac, double &dc) const {
+        ac = s.at(c) - (gnd->wires.empty() ? bcplx(0, 0) : s.at(gnd));
+        dc = s.dcAt(c) - (gnd->wires.empty() ? 0.0 : s.dcAt(gnd));
         for (BenchSocket *t : s.all)
-            if (t != c && t->net == c->net && t->source) v += t->source(s);
-        return v;
+            if (t != c && t->net == c->net) {
+                if (t->source)   ac += t->source(s);
+                if (t->sourceDc) dc += t->sourceDc(s);
+            }
     }
-    void post(const BenchSolution &s) override { v1 = read(s, c1); v2 = read(s, c2); }
-    static QPainterPath trace(const bcplx &v, double vdiv, double msdiv, double t0) {
+    // sonde branchee sur la voie : rapport (grandeur reelle / volt) et unite affichee
+    void probeOf(const BenchSolution &s, const BenchSocket *c, double &k, QString &u) const {
+        k = 1.0; u = QStringLiteral("V");
+        for (BenchSocket *t : s.all)
+            if (t != c && t->net == c->net && t->source && t->scale) { k = t->scale(); u = t->unit; return; }
+    }
+    void post(const BenchSolution &s) override {
+        read(s, c1, v1, d1); read(s, c2, v2, d2);
+        probeOf(s, c1, k1, u1); probeOf(s, c2, k2, u2);
+    }
+    static QPainterPath trace(const bcplx &v, double dc, double vdiv, double msdiv, double t0) {
         QPainterPath path;
         const double w = PI2 * BenchWindow::kFreq;
         for (int px = 0; px <= 400; px += 2) {
             double t = msdiv * 1e-3 * 10.0 * px / 400.0 + t0;
-            double val = std::real(std::sqrt(2.0) * v * std::polar(1.0, w * t));
+            double val = std::real(std::sqrt(2.0) * v * std::polar(1.0, w * t)) + dc;
             double y = 188 - val / vdiv * 40.0;
             y = std::max(20.0, std::min(356.0, y));
             if (px == 0) path.moveTo(20 + px, y); else path.lineTo(20 + px, y);
@@ -525,22 +614,22 @@ public:
         p->drawLine(QPointF(220, 28), QPointF(220, 348));
 
         const double w = PI2 * BenchWindow::kFreq;
-        bool a1 = on1() && std::abs(v1) > 1e-9, a2 = on2() && std::abs(v2) > 1e-9;
+        bool a1 = on1() && std::abs(v1) > 1e-9, a2 = on2() && std::abs(v2) > 1e-9;   // phase : composante alternative
         double ph = a1 ? std::arg(v1) : (a2 ? std::arg(v2) : 0.0);
         double t0 = (-PI2 / 4 - ph) / w;                 // declenchement : front montant de la voie 1
         p->save();
         p->setClipRect(scr);
         p->setRenderHint(QPainter::Antialiasing);
         p->setBrush(Qt::NoBrush);                        // sinon le trace est rempli et masque l'autre voie
-        if (on1()) { p->setPen(QPen(QColor(235, 205, 60), 2)); p->drawPath(trace(v1, params[0].value, params[2].value, t0)); }
-        if (on2()) { p->setPen(QPen(QColor(60, 200, 220), 2)); p->drawPath(trace(v2, params[1].value, params[2].value, t0)); }
+        if (on1()) { p->setPen(QPen(QColor(235, 205, 60), 2)); p->drawPath(trace(v1, d1, params[0].value / k1, params[2].value, t0)); }
+        if (on2()) { p->setPen(QPen(QColor(60, 200, 220), 2)); p->drawPath(trace(v2, d2, params[1].value / k2, params[2].value, t0)); }
         p->restore();
 
         QFont f = p->font(); f.setPointSize(8); f.setBold(false); p->setFont(f);
         p->setPen(QColor(235, 205, 60));
-        p->drawText(QPointF(24, 361), QStringLiteral("CH1 %1 V/div  Veff %2 V").arg(fmt(params[0].value, 3)).arg(fmt(std::abs(v1), 3)));
+        p->drawText(QPointF(24, 361), QStringLiteral("CH1 %1 %3/div  eff %2 %3").arg(QString::number(params[0].value, 'g', 4)).arg(QString::number(std::abs(v1) * k1, 'g', 4)).arg(u1));
         p->setPen(QColor(60, 200, 220));
-        p->drawText(QPointF(24, 375), QStringLiteral("CH2 %1 V/div  Veff %2 V").arg(fmt(params[1].value, 3)).arg(fmt(std::abs(v2), 3)));
+        p->drawText(QPointF(24, 375), QStringLiteral("CH2 %1 %3/div  eff %2 %3").arg(QString::number(params[1].value, 'g', 4)).arg(QString::number(std::abs(v2) * k2, 'g', 4)).arg(u2));
         p->setPen(QColor(230, 230, 230));
         QString dphi = (a1 && a2) ? fmt(std::arg(v2 / v1) * 180.0 / 3.141592653589793, 1) + QStringLiteral(" deg") : QStringLiteral("-");
         p->drawText(QPointF(250, 361), QStringLiteral("%1 ms/div").arg(fmt(params[2].value, 1)));
@@ -548,6 +637,394 @@ public:
     }
     BenchSocket *c1, *c2, *gnd;
     bcplx v1{0, 0}, v2{0, 0};
+    double d1 = 0, d2 = 0, k1 = 1, k2 = 1;
+    QString u1 = "V", u2 = "V";
+};
+
+// ---- Multimetre numerique (V alt./cont., A alt./cont.) -----------------------------------------------
+class Multimeter : public BenchModule {
+public:
+    Multimeter() : BenchModule(QStringLiteral("Multimetre numerique"), 250, 215, QColor(225, 190, 50)) {
+        instrument = true;
+        v   = addSocket("V", cRed, 50, 180);
+        com = addSocket("COM", cBlack, 125, 180);
+        a   = addSocket("A", cRed, 200, 180);
+        params = { {"Fonction (0 = V alt., 1 = V cont., 2 = A alt., 3 = A cont.)", "", 0, 3, 0, 1, 0} };
+        wheelParam = 0;
+    }
+    int mode() const { return int(params[0].value + 0.5); }
+    void elements(std::vector<BenchElem> &e) override {
+        if (mode() >= 2) e.push_back({a, com, 1.0 / kShunt});                 // ampermetre : quasi court-circuit
+    }
+    void post(const BenchSolution &s) override {
+        switch (mode()) {
+        case 0: value = std::abs(s.at(v) - s.at(com)); break;
+        case 1: value = s.dcAt(v) - s.dcAt(com); break;
+        case 2: value = std::abs((s.at(a) - s.at(com)) / kShunt); break;
+        default: value = (s.dcAt(a) - s.dcAt(com)) / kShunt; break;
+        }
+        if (mode() >= 2 && std::abs(value) > 10.0) warn = QStringLiteral("CALIBRE 10 A DEPASSE");
+    }
+    void paintExtra(QPainter *p) override {
+        p->setPen(QPen(QColor(10, 10, 10), 2));
+        p->setBrush(QColor(160, 185, 150));
+        p->drawRoundedRect(QRectF(20, 32, 210, 75), 5, 5);
+        const char *unit[4] = {"V ~", "V =", "A ~", "A ="};
+        QFont f("Monospace"); f.setStyleHint(QFont::TypeWriter); f.setPointSize(20); f.setBold(true); p->setFont(f);
+        p->setPen(QColor(20, 30, 15));
+        p->drawText(QRectF(25, 38, 200, 45), Qt::AlignRight | Qt::AlignVCenter, fmt(value, std::abs(value) < 10 ? 3 : 2));
+        f.setPointSize(10); p->setFont(f);
+        p->drawText(QRectF(25, 82, 200, 20), Qt::AlignRight | Qt::AlignVCenter, QString::fromLatin1(unit[mode()]));
+        f.setPointSize(8); f.setBold(false); p->setFont(f);
+        p->setPen(QColor(40, 40, 40));
+        p->drawText(QRectF(8, 118, 234, 40), Qt::AlignCenter | Qt::TextWordWrap,
+                    mode() < 2 ? QStringLiteral("Tension : bornes V et COM en parallele")
+                               : QStringLiteral("Courant : bornes A et COM EN SERIE dans le circuit"));
+    }
+    static constexpr double kShunt = 1e-3;
+    BenchSocket *v, *com, *a;
+    double value = 0;
+};
+
+// ---- Alimentation continue double -------------------------------------------------------------------------
+class DcSupply : public BenchModule {
+public:
+    DcSupply() : BenchModule(QStringLiteral("Alimentation continue 2 x 30 V"), 330, 190, QColor(80, 86, 96)) {
+        instrument = true;
+        p1 = addSocket("1+", cRed, 50, 150);
+        m1 = addSocket("1-", cBlack, 105, 150);
+        p2 = addSocket("2+", cRed, 225, 150);
+        m2 = addSocket("2-", cBlack, 280, 150);
+        params = { {"Tension voie 1", "V", 0, 30, 10, 0.5, 2},
+                   {"Tension voie 2", "V", 0, 30, 10, 0.5, 2},
+                   {"Sortie (0 = coupee, 1 = active)", "", 0, 1, 1, 1, 0} };
+        wheelParam = 0;
+    }
+    bool on() const { return params[2].value > 0.5; }
+    bool isSupply() const override { return true; }
+    void sources(std::vector<BenchSrc> &s) override {
+        if (!on()) return;
+        s.push_back({p1, m1, bcplx(0, 0), params[0].value});
+        s.push_back({p2, m2, bcplx(0, 0), params[1].value});
+    }
+    void paintExtra(QPainter *g) override {
+        g->setPen(QPen(QColor(10, 10, 10), 2));
+        g->setBrush(QColor(20, 30, 20));
+        g->drawRoundedRect(QRectF(20, 32, 130, 60), 4, 4);
+        g->drawRoundedRect(QRectF(180, 32, 130, 60), 4, 4);
+        QFont f("Monospace"); f.setStyleHint(QFont::TypeWriter); f.setPointSize(16); f.setBold(true); g->setFont(f);
+        g->setPen(on() ? QColor(90, 230, 110) : QColor(70, 90, 70));
+        g->drawText(QRectF(20, 32, 130, 60), Qt::AlignCenter, fmt(on() ? params[0].value : 0, 2) + " V");
+        g->drawText(QRectF(180, 32, 130, 60), Qt::AlignCenter, fmt(on() ? params[1].value : 0, 2) + " V");
+    }
+    BenchSocket *p1, *m1, *p2, *m2;
+};
+
+// ---- Bornier de distribution : deux rangees de 4 douilles reliees entre elles -------------------------
+class Bornier : public BenchModule {
+public:
+    Bornier() : BenchModule(QStringLiteral("Bornier (2 x 4 douilles)"), 260, 150, QColor(200, 204, 196)) {
+        for (int k = 0; k < 4; ++k) {
+            top[k] = addSocket(QStringLiteral("A%1").arg(k + 1), cBlack, 40 + 60 * k, 60);
+            bot[k] = addSocket(QStringLiteral("B%1").arg(k + 1), cBlack, 40 + 60 * k, 115);
+        }
+    }
+    bool hasLinks() const override { return true; }
+    void links(std::vector<std::pair<BenchSocket *, BenchSocket *>> &l) override {
+        for (int k = 0; k < 3; ++k) { l.push_back({top[k], top[k + 1]}); l.push_back({bot[k], bot[k + 1]}); }
+    }
+    void paintExtra(QPainter *g) override {
+        g->setPen(QPen(QColor(120, 120, 120), 6, Qt::SolidLine, Qt::RoundCap));
+        g->drawLine(QPointF(40, 60), QPointF(220, 60));
+        g->drawLine(QPointF(40, 115), QPointF(220, 115));
+    }
+    BenchSocket *top[4], *bot[4];
+};
+
+// ---- Courant dans un fil (pour les pinces a machoire) ------------------------------------------------------
+// Courant qui traverse le fil w, compte de a vers b (puis inverse si b est le pupitre : sens source -> charge).
+// Il est deduit de la douille d'une extremite qui n'a qu'un seul fil et appartient a un appareil sans liaison interne.
+bool wireCurrent(const BenchSolution &s, const BenchWire *w, bcplx &I, double &Idc)
+{
+    BenchSocket *ends[2] = {w->a, w->b};
+    for (int k = 0; k < 2; ++k) {
+        BenchSocket *e = ends[k];
+        if (e->wires.size() != 1 || e->module->hasLinks()) continue;
+        const bcplx in = s.iinAt(e);
+        const double ind = s.iinDcAt(e);
+        I   = (k == 0) ? -in  : in;
+        Idc = (k == 0) ? -ind : ind;
+        if (w->b->module->isSupply() && !w->a->module->isSupply()) { I = -I; Idc = -Idc; }
+        return true;
+    }
+    return false;
+}
+
+// ---- Base des pinces : anneau cliquable + fil pince -----------------------------------------------------------
+class ClampBase : public BenchModule {
+public:
+    ClampBase(const QString &t, int w_, int h_, const QColor &c) : BenchModule(t, w_, h_, c) {
+        instrument = true;
+        w = 250;
+        jaw = new BenchJaw(this, QPointF(w_ / 2.0, 84), 38);
+    }
+    ~ClampBase() override {
+        detach();
+    }
+    void detach() {
+        if (!wire) return;
+        auto &v = wire->clamps;
+        v.erase(std::remove(v.begin(), v.end(), (BenchModule *)this), v.end());
+        wire->refreshClamp();
+        wire = nullptr;
+    }
+    bool canClamp() const override { return true; }
+    BenchWire *clampedWire() const override { return wire; }
+    void clampTo(BenchWire *w) override {
+        detach();
+        wire = w;
+        if (w) { w->clamps.push_back(this); w->refreshClamp(); }
+        update();
+        if (jaw) jaw->update();
+    }
+    void onWireRemoved(BenchWire *w) override { if (wire == w) { wire = nullptr; if (jaw) jaw->update(); } }
+    // 0 = pas de fil, 1 = ok, 2 = fil ambigu ; I et Idc selon le sens choisi
+    int current(const BenchSolution &s, bcplx &I, double &Idc) const {
+        if (!wire) return 0;
+        if (!wireCurrent(s, wire, I, Idc)) return 2;
+        if (flip() > 0.5) { I = -I; Idc = -Idc; }
+        return 1;
+    }
+    virtual double flip() const { return 0; }
+    // ---- dessin commun des pinces : machoire rouge effilee, collerette, corps sombre, gachette ----
+    static QPainterPath holePath() {
+        QPainterPath h;
+        h.moveTo(98, 138); h.lineTo(152, 138);
+        h.cubicTo(170, 108, 184, 70, 168, 42);
+        h.cubicTo(155, 20, 95, 20, 82, 42);
+        h.cubicTo(66, 70, 80, 108, 98, 138);
+        return h;
+    }
+    static QPainterPath jawOuter() {
+        QPainterPath j;
+        j.moveTo(58, 152); j.lineTo(36, 72); j.quadTo(30, 4, 100, 3);
+        j.lineTo(150, 3); j.quadTo(220, 4, 214, 72); j.lineTo(192, 152); j.closeSubpath();
+        return j;
+    }
+    static QPainterPath triggerPath() {
+        QPainterPath t;
+        t.moveTo(30, 205); t.lineTo(5, 238); t.quadTo(0, 262, 18, 267); t.lineTo(34, 267); t.closeSubpath();
+        return t;
+    }
+    QPainterPath bodyPath() const override {
+        QPainterPath b; b.addRoundedRect(QRectF(bx0, 150, bx1 - bx0, h - 151), 16, 16);
+        QPainterPath col; col.addRoundedRect(QRectF(8, 148, 234, 20), 10, 10);
+        return b.united(col).united(jawOuter()).united(triggerPath()).subtracted(holePath());
+    }
+    double titleY() const override { return 149; }
+    void paintDeco(QPainter *p, const QString &cat) {
+        p->setBrush(QColor(196, 32, 38));
+        p->setPen(QPen(QColor(120, 18, 22), 1.5));
+        p->drawPath(jawOuter().united(triggerPath()).subtracted(holePath()));
+        p->setPen(QPen(QColor(120, 18, 22), 2));
+        p->drawLine(QPointF(125, 3), QPointF(125, 21));                              // fente du haut de la machoire
+        QPolygonF plate; plate << QPointF(52, 112) << QPointF(198, 112) << QPointF(194, 148) << QPointF(56, 148);
+        p->setBrush(QColor(48, 48, 52)); p->setPen(QPen(QColor(25, 25, 28), 1.5));
+        p->drawPolygon(plate);
+        p->setPen(QColor(235, 235, 235));
+        QFont f = p->font(); f.setPointSize(8); f.setBold(true); p->setFont(f);
+        p->drawText(QRectF(52, 120, 146, 22), Qt::AlignCenter, cat);
+        p->setPen(QPen(QColor(105, 105, 112), 2)); p->setBrush(Qt::NoBrush);          // arete de la collerette
+        p->drawRoundedRect(QRectF(8, 148, 234, 20), 10, 10);
+    }
+    double bx0 = 22, bx1 = 228;
+    BenchWire *wire = nullptr;
+    BenchJaw *jaw = nullptr;
+};
+
+// ---- Pince wattmetre (types F205, F407, F27) --------------------------------------------------------------------
+class PowerClamp : public ClampBase {
+public:
+    PowerClamp(int model)
+        : ClampBase(model == 0 ? QStringLiteral("Pince wattmetre 600 A")
+                    : model == 1 ? QStringLiteral("Pince wattmetre 1000 A")
+                                 : QStringLiteral("Pince wattmetre 1000 A (ancien)"),
+                    250, model == 2 ? 612 : 565, QColor(58, 58, 62)), model_(model) {
+        com = addSocket("COM", QColor(20, 20, 22), 80, model == 2 ? 575 : 525);
+        vp  = addSocket("V+", cRed, 170, model == 2 ? 575 : 525);
+        if (model == 2) { bx0 = 14; bx1 = 236; }
+        params = { {"Fonction (0 OFF, 1 V, 2 A, 3 W, 4 ohm)", "", 0, 4, 3, 1, 0},
+                   {"Grandeur en W (0 P, 1 S, 2 Q, 3 PF)", "", 0, 3, 0, 1, 0},
+                   {"Maintien de l'affichage (HOLD)", "", 0, 1, 0, 1, 0},
+                   {"Sens de la pince (0 normal, 1 inverse)", "", 0, 1, 0, 1, 0},
+                   {"Afficher la frequence (Hz)", "", 0, 1, 0, 1, 0} };
+        wheelParam = 0;
+    }
+    double flip() const override { return params[3].value; }
+    int fn() const { return int(params[0].value + 0.5); }
+    static QString num(double x) {
+        const double a = std::abs(x);
+        return fmt(x, a < 10 ? 3 : (a < 100 ? 2 : (a < 1000 ? 1 : 0)));
+    }
+    void post(const BenchSolution &s) override {
+        const bcplx uac = s.at(vp) - s.at(com);
+        const double udc = s.dcAt(vp) - s.dcAt(com);
+        bcplx iac(0, 0); double idc = 0;
+        const int st = current(s, iac, idc);
+        const double urms = std::hypot(std::abs(uac), udc), irms = std::hypot(std::abs(iac), idc);
+        const bcplx sp = uac * std::conj(iac);
+        const double P = sp.real() + udc * idc, Q = sp.imag(), S = urms * irms, PF = S > 1e-9 ? P / S : 0;
+        main_ = "---"; unit_ = ""; sub_.clear();
+        const bool needI = (fn() == 2 || fn() == 3);
+        if (fn() == 0) main_.clear();
+        else if (fn() == 1) { main_ = num(urms); unit_ = "V"; sub_ = "TRMS AC+DC"; }
+        else if (fn() == 4 && model_ == 2) { main_ = "PrGM"; unit_ = ""; sub_ = QStringLiteral("non disponible"); }
+        else if (fn() == 4) {
+            if (std::abs(uac) > 5 || std::abs(udc) > 5) { main_ = "OL"; unit_ = "ohm"; sub_ = QStringLiteral("circuit sous tension !"); warn = QStringLiteral("OHMMETRE SOUS TENSION"); }
+            else {
+                const double r = s.rdc ? s.rdc(vp, com) : 1e12;
+                if (r > 5e7) { main_ = "OL"; unit_ = "ohm"; sub_ = QStringLiteral("circuit ouvert"); }
+                else if (r >= 1000) { main_ = num(r / 1000.0); unit_ = "kohm"; }
+                else { main_ = num(r); unit_ = "ohm"; }
+            }
+        }
+        else if (st == 0) sub_ = QStringLiteral("Cliquez sur l'anneau, puis sur un fil");
+        else if (st == 2) { main_ = "?"; warn = QStringLiteral("FIL AMBIGU"); sub_ = QStringLiteral("plusieurs fils sur la douille"); }
+        else if (fn() == 2) { main_ = num(irms); unit_ = "A"; sub_ = "TRMS AC+DC"; }
+        else {
+            const int g = int(params[1].value + 0.5);
+            if (g == 0) { main_ = num(P); unit_ = "W"; }
+            else if (g == 1) { main_ = num(S); unit_ = "VA"; }
+            else if (g == 2) { main_ = num(Q); unit_ = "var"; }
+            else { main_ = fmt(PF, 2); unit_ = "PF"; }
+            sub_ = QStringLiteral("%1 V  %2 A").arg(num(urms), num(irms));
+            if (std::abs(Q) > 0.05 * S && S > 1e-6) sub_ += Q > 0 ? "  ind" : "  cap";
+        }
+        (void)needI;
+        if (params[4].value > 0.5) sub_ = QStringLiteral("%1 Hz").arg((std::abs(uac) > 0.5 || std::abs(iac) > 1e-3) ? "50.0" : "0.0");
+        const bool hold = params[2].value > 0.5;
+        if (hold && !wasHold_) { hMain_ = main_; hUnit_ = unit_; hSub_ = sub_; }
+        wasHold_ = hold;
+        if (hold) { main_ = hMain_; unit_ = hUnit_; sub_ = hSub_; }
+        const double vmax = model_ == 1 ? 1000 : 600;
+        if (urms > vmax) warn = QStringLiteral("TENSION > %1 V").arg(vmax);
+    }
+    void lcd(QPainter *p, const QRectF &r, int big) {
+        p->setPen(QPen(QColor(15, 15, 15), 2)); p->setBrush(QColor(165, 188, 155));
+        p->drawRoundedRect(r, 5, 5);
+        p->setPen(QColor(20, 30, 15));
+        QFont m("Monospace"); m.setStyleHint(QFont::TypeWriter); m.setBold(true); m.setPointSize(big); p->setFont(m);
+        p->drawText(QRectF(r.x() + 4, r.y() + 4, r.width() - 8, r.height() * 0.45), Qt::AlignRight | Qt::AlignVCenter, main_);
+        m.setPointSize(10); p->setFont(m);
+        p->drawText(QRectF(r.x() + 4, r.y() + r.height() * 0.46, r.width() - 8, 18), Qt::AlignRight | Qt::AlignVCenter, unit_);
+        m.setPointSize(7); m.setBold(false); p->setFont(m);
+        p->drawText(QRectF(r.x() + 5, r.y() + r.height() * 0.66, r.width() - 10, r.height() * 0.32), Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap, sub_);
+        if (params[2].value > 0.5) { m.setBold(true); p->setFont(m); p->drawText(QRectF(r.x() + 5, r.y() + 3, 50, 12), Qt::AlignLeft, "HOLD"); }
+    }
+    void knob(QPainter *p, QPointF c, const QPointF &dir, double rr) {
+        p->setPen(QPen(QColor(25, 25, 28), 1.5)); p->setBrush(QColor(112, 112, 118));
+        p->drawEllipse(c, rr, rr);
+        p->setPen(QPen(QColor(80, 80, 86), 2));
+        for (int k = 0; k < 28; ++k) {                                   // molettage du bord
+            const double a = k * 6.2831853 / 28;
+            p->drawLine(c + QPointF(std::cos(a), std::sin(a)) * (rr - 1), c + QPointF(std::cos(a), std::sin(a)) * (rr - 5));
+        }
+        p->setPen(QPen(QColor(25, 25, 28), 1.5)); p->setBrush(QColor(46, 46, 50));
+        p->drawEllipse(c, rr - 8, rr - 8);
+        p->setPen(QPen(QColor(235, 235, 235), 5, Qt::SolidLine, Qt::RoundCap));
+        p->drawLine(c, c + dir);
+    }
+    void key(QPainter *p, QRectF r, const QColor &col, const QString &t, const QColor &tc = QColor(15, 15, 15)) {
+        p->setPen(QPen(QColor(10, 10, 10), 1.5)); p->setBrush(col);
+        p->drawRoundedRect(r, 6, 6);
+        QFont k = p->font(); k.setPointSize(6); k.setBold(true); p->setFont(k);
+        p->setPen(tc); p->drawText(r, Qt::AlignCenter, t);
+    }
+    void paintExtra(QPainter *p) override {
+        paintDeco(p, model_ == 1 ? QStringLiteral("1000 V CAT IV   1000 A") : (model_ == 0 ? QStringLiteral("600 V CAT IV   600 A") : QStringLiteral("600 V CAT III   1000 A")));
+        QFont f = p->font(); f.setBold(true); f.setPointSize(8); p->setFont(f);
+        const QColor white(236, 236, 236), yellow(232, 200, 40);
+        if (model_ != 2) {
+            const QPointF dc(150, 232);
+            struct L { const char *t; QPointF v; QColor c; };
+            const L labs[5] = { {"OFF", QPointF(0, 58), white}, {"V", QPointF(-56, 42), white}, {"A", QPointF(-66, -10), white},
+                                {"W", QPointF(-52, -40), white}, {"ohm", QPointF(-66, 16), yellow} };
+            for (int k = 0; k < 5; ++k) { p->setPen(labs[k].c); p->drawText(QRectF(dc.x() + labs[k].v.x() - 24, dc.y() + labs[k].v.y() - 8, 48, 16), Qt::AlignCenter, labs[k].t); }
+            p->setPen(white); f.setPointSize(6); p->setFont(f);
+            p->drawText(QRectF(36, 178, 70, 12), Qt::AlignLeft, "VA var PF");
+            const int fi = std::max(0, std::min(4, fn()));
+            QPointF d = labs[fi].v; if (fi == 0) d = QPointF(0, 40);
+            const double len = std::hypot(d.x(), d.y());
+            knob(p, dc, d / len * 28.0, 42);
+            // touches
+            key(p, QRectF(42, 322, 48, 24), QColor(70, 130, 215), "HOLD", QColor(255, 255, 255));
+            key(p, QRectF(104, 322, 48, 24), yellow, QStringLiteral("1F/3F"));
+            key(p, QRectF(166, 322, 48, 24), QColor(46, 46, 50), model_ == 1 ? "^" : "*", white);
+            key(p, QRectF(42, 356, 48, 24), QColor(46, 46, 50), "MAX/MIN", white);
+            key(p, QRectF(104, 356, 48, 24), QColor(190, 190, 195), "Hz");
+            key(p, QRectF(166, 356, 48, 24), QColor(46, 46, 50), model_ == 1 ? "v" : "REL", white);
+            lcd(p, QRectF(44, 394, 162, 106), 21);
+            p->setPen(QPen(QColor(200, 30, 35), 4)); p->setBrush(Qt::NoBrush);        // anneau rouge de la borne V+
+            p->drawEllipse(QPointF(170, 525), 17, 17);
+        } else {
+            const QPointF dc(135, 244);
+            struct L { const char *t; QPointF v; };
+            const L labs[5] = { {"OFF", QPointF(0, -56)}, {"V", QPointF(-62, -38)}, {"A", QPointF(-72, -8)}, {"W", QPointF(-70, 24)}, {"PRGM", QPointF(-30, 56)} };
+            p->setPen(white);
+            for (int k = 0; k < 4; ++k) p->drawText(QRectF(dc.x() + labs[k].v.x() - 24, dc.y() + labs[k].v.y() - 8, 48, 16), Qt::AlignCenter, labs[k].t);
+            p->drawText(QRectF(60, 292, 150, 14), Qt::AlignCenter, "PRGM");
+            key(p, QRectF(172, 178, 44, 18), QColor(110, 120, 190), "HOLD", white);
+            const int fi = std::max(0, std::min(4, fn()));
+            QPointF d = labs[fi].v; if (fi == 0) d = QPointF(0, -40); if (fi == 4) d = QPointF(-24, 40);
+            const double len = std::hypot(d.x(), d.y());
+            knob(p, dc, d / len * 28.0, 42);
+            p->setPen(Qt::NoPen); p->setBrush(QColor(168, 174, 180));                 // boitier translucide de l'afficheur
+            p->drawRoundedRect(QRectF(30, 322, 190, 168), 8, 8);
+            lcd(p, QRectF(44, 336, 162, 140), 22);
+            p->setBrush(QColor(28, 28, 30));                                          // clavier
+            p->drawRoundedRect(QRectF(30, 498, 190, 56), 8, 8);
+            const char *kl[8] = {"MIN", "SMOOTH", "HARM", "^", "AC/DC", "Hz", "v", ""};
+            for (int k = 0; k < 8; ++k) {
+                if (!kl[k][0]) continue;
+                key(p, QRectF(38 + (k % 4) * 44, 506 + (k / 4) * 24, 38, 18), QColor(58, 58, 62), kl[k], white);
+            }
+        }
+    }
+    int model_;
+    BenchSocket *com, *vp;
+    QString main_, unit_, sub_, hMain_, hUnit_, hSub_;
+    bool wasHold_ = false;
+};
+
+// ---- Pince de courant (sortie vers l'oscilloscope) ---------------------------------------------------------------
+class CurrentProbe : public ClampBase {
+public:
+    CurrentProbe() : ClampBase(QStringLiteral("Pince de courant (sortie oscillo)"), 250, 330, QColor(58, 58, 62)) {
+        out = addSocket("Sortie", QColor(150, 150, 155), 125, 285);
+        params = { {"Sensibilite", "V/A", 0.001, 10, 0.1, 0.05, 3},
+                   {"Sens de la pince (0 normal, 1 inverse)", "", 0, 1, 0, 1, 0} };
+        out->scale = [this] { return 1.0 / params[0].value; };
+        out->unit = "A";
+        out->source = [this](const BenchSolution &s) {
+            bcplx I(0, 0); double d = 0;
+            return current(s, I, d) == 1 ? I * params[0].value : bcplx(0, 0);
+        };
+        out->sourceDc = [this](const BenchSolution &s) {
+            bcplx I(0, 0); double d = 0;
+            return current(s, I, d) == 1 ? d * params[0].value : 0.0;
+        };
+    }
+    double flip() const override { return params[1].value; }
+    void paintExtra(QPainter *p) override {
+        paintDeco(p, QStringLiteral("CAT III   100 A"));
+        p->setPen(QColor(236, 236, 236));
+        QFont f = p->font(); f.setPointSize(9); f.setBold(true); p->setFont(f);
+        p->drawText(QRectF(30, 190, 190, 18), Qt::AlignCenter, QStringLiteral("%1 V/A").arg(fmt(params[0].value, 3)));
+        f.setBold(false); f.setPointSize(7); p->setFont(f);
+        p->drawText(QRectF(30, 214, 190, 40), Qt::AlignCenter | Qt::TextWordWrap,
+                    wire ? QStringLiteral("Pince posee sur un fil") : QStringLiteral("Cliquez sur l'anneau, puis sur un fil"));
+    }
+    BenchSocket *out;
 };
 
 } // namespace
@@ -559,7 +1036,10 @@ QStringList BenchWindow::kinds()
 {
     return { "Pupitre d'alimentation", "Rheostat 1400 ohm / 1 A", "Rheostat 2000 ohm / 0,2 A",
              "Boite a decades R50", "Charge inductive", "Condensateurs 3 x 5 uF",
-             "Lampe a incandescence", "Pince multifonction", "Oscilloscope 2 voies", "Sonde differentielle" };
+             "Lampe a incandescence", "Pince multifonction (serie)", "Oscilloscope 2 voies", "Sonde differentielle",
+             "Multimetre numerique", "Alimentation continue 2 x 30 V", "Bornier de distribution",
+             "Pince wattmetre 600 A (F205)", "Pince wattmetre 1000 A (F407)", "Pince wattmetre 1000 A (F27)",
+             "Pince de courant (sortie oscilloscope)" };
 }
 
 BenchModule *BenchWindow::addModule(const QString &kind, QPointF pos)
@@ -577,6 +1057,13 @@ BenchModule *BenchWindow::addModule(const QString &kind, QPointF pos)
     case 7: m = new Pince; break;
     case 8: m = new Scope; break;
     case 9: m = new Probe; break;
+    case 10: m = new Multimeter; break;
+    case 11: m = new DcSupply; break;
+    case 12: m = new Bornier; break;
+    case 13: m = new PowerClamp(0); break;
+    case 14: m = new PowerClamp(1); break;
+    case 15: m = new PowerClamp(2); break;
+    case 16: m = new CurrentProbe; break;
     default: return nullptr;
     }
     m->kind = i;
@@ -632,7 +1119,7 @@ void BenchWindow::clearAll()
 
 QPointF BenchWindow::findSlot(BenchModule *m) const
 {
-    const double yMin = m->instrument ? 40 : 510, yMax = m->instrument ? 466 : 990;
+    const double yMin = m->instrument ? 40 : 700, yMax = m->instrument ? 656 : 1240;
     for (double y = yMin; y + m->h <= yMax; y += 10)
         for (double x = 20; x + m->w <= 1680; x += 10) {
             const QRectF r(x, y, m->w, m->h);
@@ -654,22 +1141,80 @@ void BenchWindow::arrange()
 
 void BenchWindow::drawTable()
 {
-    auto *wood = m_scene->addRect(0, 0, 1700, 1000, Qt::NoPen, QColor(206, 172, 128));
+    auto *wood = m_scene->addRect(0, 0, 1700, 1250, Qt::NoPen, QColor(206, 172, 128));
     wood->setZValue(-20);
-    auto *rail = m_scene->addRect(0, 0, 1700, 470, QPen(QColor(110, 115, 125), 3), QColor(188, 194, 204));
+    auto *rail = m_scene->addRect(0, 0, 1700, 660, QPen(QColor(110, 115, 125), 3), QColor(188, 194, 204));
     rail->setZValue(-19);
-    auto *edge = m_scene->addRect(0, 470, 1700, 8, Qt::NoPen, QColor(120, 90, 60));
+    auto *edge = m_scene->addRect(0, 660, 1700, 8, Qt::NoPen, QColor(120, 90, 60));
     edge->setZValue(-18);
     auto *t1 = m_scene->addSimpleText(QStringLiteral("PUPITRE ET APPAREILS DE MESURE"));
     t1->setPos(14, 8); t1->setBrush(QColor(90, 95, 105)); t1->setZValue(-17);
     auto *t2 = m_scene->addSimpleText(QStringLiteral("PLAN DE TRAVAIL - CHARGES"));
-    t2->setPos(14, 482); t2->setBrush(QColor(120, 90, 60)); t2->setZValue(-17);
+    t2->setPos(14, 672); t2->setBrush(QColor(120, 90, 60)); t2->setZValue(-17);
+}
+
+bool BenchWindow::saveToFile(const QString &path) const
+{
+    QJsonArray ms, ws;
+    for (BenchModule *m : m_modules) {
+        QJsonArray pv;
+        for (const BenchParam &p : m->params) pv.append(p.value);
+        const int wi = m->clampedWire() ? (int)(std::find(m_wires.begin(), m_wires.end(), m->clampedWire()) - m_wires.begin()) : -1;
+        ms.append(QJsonObject{{"kind", kinds().value(m->kind)}, {"x", m->pos().x()}, {"y", m->pos().y()}, {"params", pv},
+                              {"clamp", wi >= (int)m_wires.size() ? -1 : wi}});
+    }
+    auto ref = [&](BenchSocket *s) {
+        int mi = (int)(std::find(m_modules.begin(), m_modules.end(), s->module) - m_modules.begin());
+        int si = (int)(std::find(s->module->sockets.begin(), s->module->sockets.end(), s) - s->module->sockets.begin());
+        return QJsonArray{mi, si};
+    };
+    for (BenchWire *w : m_wires)
+        ws.append(QJsonObject{{"a", ref(w->a)}, {"b", ref(w->b)}, {"color", w->color().name()}});
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    f.write(QJsonDocument(QJsonObject{{"voltix_bench", 1}, {"modules", ms}, {"wires", ws}}).toJson());
+    return true;
+}
+
+bool BenchWindow::loadFromFile(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    if (!doc.isObject() || !doc.object().contains("voltix_bench")) return false;
+    clearAll();
+    std::vector<BenchModule *> made;
+    std::vector<int> clampIdx;
+    for (const QJsonValue &v : doc.object().value("modules").toArray()) {
+        const QJsonObject o = v.toObject();
+        BenchModule *m = addModule(o.value("kind").toString(), QPointF(o.value("x").toDouble(), o.value("y").toDouble()));
+        if (!m) return false;
+        const QJsonArray pv = o.value("params").toArray();
+        for (int i = 0; i < pv.size() && i < (int)m->params.size(); ++i)
+            m->params[i].value = qBound(m->params[i].min, pv[i].toDouble(), m->params[i].max);
+        made.push_back(m);
+        clampIdx.push_back(o.value("clamp").toInt(-1));
+    }
+    auto sock = [&](const QJsonValue &r) -> BenchSocket * {
+        const QJsonArray a = r.toArray();
+        const int mi = a.at(0).toInt(-1), si = a.at(1).toInt(-1);
+        if (mi < 0 || mi >= (int)made.size() || si < 0 || si >= (int)made[mi]->sockets.size()) return nullptr;
+        return made[mi]->sockets[si];
+    };
+    for (const QJsonValue &v : doc.object().value("wires").toArray()) {
+        const QJsonObject o = v.toObject();
+        connectSockets(sock(o.value("a")), sock(o.value("b")), QColor(o.value("color").toString()));
+    }
+    for (size_t i = 0; i < made.size(); ++i)
+        if (clampIdx[i] >= 0 && clampIdx[i] < (int)m_wires.size()) made[i]->clampTo(m_wires[clampIdx[i]]);
+    recompute();
+    return true;
 }
 
 void BenchWindow::showEvent(QShowEvent *e)
 {
     QMainWindow::showEvent(e);
-    if (!m_fitted) { m_fitted = true; m_view->fitInView(QRectF(0, 0, 1700, 1000), Qt::KeepAspectRatio); }
+    if (!m_fitted) { m_fitted = true; m_view->fitInView(QRectF(0, 0, 1700, 1250), Qt::KeepAspectRatio); }
 }
 
 bool BenchWindow::recompute()
@@ -682,6 +1227,11 @@ bool BenchWindow::recompute()
     for (int i = 0; i < N; ++i) par[i] = i;
     std::function<int(int)> find = [&](int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
     for (BenchWire *w : m_wires) par[find(w->a->net)] = find(w->b->net);
+    for (BenchModule *m : m_modules) {                       // liaisons internes (bornier...)
+        std::vector<std::pair<BenchSocket *, BenchSocket *>> lk;
+        m->links(lk);
+        for (auto &pr : lk) par[find(pr.first->net)] = find(pr.second->net);
+    }
 
     // 2) masse = neutre du pupitre (sinon premiere douille)
     int groundRoot = N ? find(0) : 0;
@@ -705,32 +1255,34 @@ bool BenchWindow::recompute()
     for (BenchModule *m : m_modules) { m->elements(el); m->sources(src); }
 
     int nn = std::max(0, nets - 1), ns = (int)src.size(), D = nn + ns;
-    BenchSolution sol; sol.v.assign(std::max(nets, 1), bcplx(0, 0));
+    BenchSolution sol;
     sol.all = all;
-    bool ok = true;
 
-    if (D > 0) {
+    // resolution (MNA) en alternatif (phaseurs, 50 Hz) puis en continu (bobines = resistance, condensateurs = ouverts)
+    auto solveSys = [&](bool dc, std::vector<bcplx> &out, std::vector<bcplx> *xs = nullptr) -> bool {
+        out.assign(std::max(nets, 1), bcplx(0, 0));
+        if (D <= 0) return true;
         std::vector<bcplx> A((size_t)D * D, bcplx(0, 0)), b(D, bcplx(0, 0));
         auto at = [&](int r, int c) -> bcplx & { return A[(size_t)r * D + c]; };
         for (int k = 0; k < nn; ++k) at(k, k) += 1e-9;                        // evite les noeuds flottants
         for (const BenchElem &e : el) {
             int i = e.a->net - 1, j = e.b->net - 1;
             if (e.a->net == e.b->net) continue;
-            if (i >= 0) at(i, i) += e.y;
-            if (j >= 0) at(j, j) += e.y;
-            if (i >= 0 && j >= 0) { at(i, j) -= e.y; at(j, i) -= e.y; }
+            bcplx y = dc ? bcplx(e.ydc >= 0 ? e.ydc : e.y.real(), 0) : e.y;
+            if (i >= 0) at(i, i) += y;
+            if (j >= 0) at(j, j) += y;
+            if (i >= 0 && j >= 0) { at(i, j) -= y; at(j, i) -= y; }
         }
         for (int k = 0; k < ns; ++k) {
             int row = nn + k, ip = src[k].p->net - 1, in = src[k].n->net - 1;
             if (ip >= 0) { at(ip, row) += 1.0; at(row, ip) += 1.0; }
             if (in >= 0) { at(in, row) -= 1.0; at(row, in) -= 1.0; }
-            b[row] = src[k].v;
+            b[row] = dc ? bcplx(src[k].vdc, 0) : src[k].v;
         }
-        // elimination de Gauss (pivot partiel)
-        for (int c = 0; c < D && ok; ++c) {
+        for (int c = 0; c < D; ++c) {                                          // elimination de Gauss (pivot partiel)
             int piv = c;
             for (int r = c + 1; r < D; ++r) if (std::abs(at(r, c)) > std::abs(at(piv, c))) piv = r;
-            if (std::abs(at(piv, c)) < 1e-12) { ok = false; break; }
+            if (std::abs(at(piv, c)) < 1e-12) return false;
             if (piv != c) { for (int k = 0; k < D; ++k) std::swap(at(c, k), at(piv, k)); std::swap(b[c], b[piv]); }
             for (int r = c + 1; r < D; ++r) {
                 bcplx f = at(r, c) / at(c, c);
@@ -739,22 +1291,90 @@ bool BenchWindow::recompute()
                 b[r] -= f * b[c];
             }
         }
-        if (ok) {
-            std::vector<bcplx> x(D);
-            for (int r = D - 1; r >= 0; --r) {
-                bcplx s = b[r];
-                for (int k = r + 1; k < D; ++k) s -= at(r, k) * x[k];
+        std::vector<bcplx> x(D);
+        for (int r = D - 1; r >= 0; --r) {
+            bcplx s = b[r];
+            for (int k = r + 1; k < D; ++k) s -= at(r, k) * x[k];
+            x[r] = s / at(r, r);
+        }
+        for (int k = 0; k < nn; ++k) out[k + 1] = x[k];
+        if (xs) xs->assign(x.begin() + nn, x.end());
+        return true;
+    };
+    std::vector<bcplx> dcv, xac, xdc;
+    const bool ok = solveSys(false, sol.v, &xac) && solveSys(true, dcv, &xdc);
+    for (int i = 0; i < N; ++i) all[i]->idx = i;
+    {   // ohmmetre : resistance vue entre deux douilles, circuit hors tension (sources = courts-circuits)
+        struct R { int a, b; double g; };
+        auto rs = std::make_shared<std::vector<R>>();
+        for (const BenchElem &e : el) rs->push_back({e.a->net, e.b->net, e.ydc >= 0 ? e.ydc : e.y.real()});
+        for (const BenchSrc &s : src) rs->push_back({s.p->net, s.n->net, 1e6});
+        const int nets_ = nets;
+        sol.rdc = [rs, nets_](const BenchSocket *p, const BenchSocket *q) -> double {
+            const int n = nets_ - 1;
+            if (p->net == q->net) return 0.0;
+            if (n <= 0) return 1e12;
+            std::vector<double> A((size_t)n * n, 0.0), b(n, 0.0);
+            auto at = [&](int r, int k) -> double & { return A[(size_t)r * n + k]; };
+            for (int k = 0; k < n; ++k) at(k, k) += 1e-9;
+            for (const R &e : *rs) {
+                int i = e.a - 1, j = e.b - 1;
+                if (e.a == e.b) continue;
+                if (i >= 0) at(i, i) += e.g;
+                if (j >= 0) at(j, j) += e.g;
+                if (i >= 0 && j >= 0) { at(i, j) -= e.g; at(j, i) -= e.g; }
+            }
+            if (p->net > 0) b[p->net - 1] += 1.0;
+            if (q->net > 0) b[q->net - 1] -= 1.0;
+            for (int cc = 0; cc < n; ++cc) {
+                int piv = cc;
+                for (int r = cc + 1; r < n; ++r) if (std::abs(at(r, cc)) > std::abs(at(piv, cc))) piv = r;
+                if (std::abs(at(piv, cc)) < 1e-15) return 1e12;
+                if (piv != cc) { for (int k = 0; k < n; ++k) std::swap(at(cc, k), at(piv, k)); std::swap(b[cc], b[piv]); }
+                for (int r = cc + 1; r < n; ++r) {
+                    const double f = at(r, cc) / at(cc, cc);
+                    if (f == 0.0) continue;
+                    for (int k = cc; k < n; ++k) at(r, k) -= f * at(cc, k);
+                    b[r] -= f * b[cc];
+                }
+            }
+            std::vector<double> x(n);
+            for (int r = n - 1; r >= 0; --r) {
+                double s = b[r];
+                for (int k = r + 1; k < n; ++k) s -= at(r, k) * x[k];
                 x[r] = s / at(r, r);
             }
-            for (int k = 0; k < nn; ++k) sol.v[k + 1] = x[k];
+            const double vp = p->net > 0 ? x[p->net - 1] : 0.0, vq = q->net > 0 ? x[q->net - 1] : 0.0;
+            return std::abs(vp - vq);
+        };
+    }
+    sol.iin.assign(N, bcplx(0, 0));
+    sol.iindc.assign(N, 0.0);
+    if (ok) {
+        auto vAt = [&](const std::vector<bcplx> &v, int net) { return net < (int)v.size() ? v[net] : bcplx(0, 0); };
+        for (const BenchElem &e : el) {
+            if (e.a->net == e.b->net) continue;
+            const bcplx i = (vAt(sol.v, e.a->net) - vAt(sol.v, e.b->net)) * e.y;
+            const double yd = e.ydc >= 0 ? e.ydc : e.y.real();
+            const double id = (vAt(dcv, e.a->net) - vAt(dcv, e.b->net)).real() * yd;
+            sol.iin[e.a->idx] += i;  sol.iin[e.b->idx] -= i;
+            sol.iindc[e.a->idx] += id; sol.iindc[e.b->idx] -= id;
+        }
+        for (int k = 0; k < ns && k < (int)xac.size() && k < (int)xdc.size(); ++k) {
+            sol.iin[src[k].p->idx] += xac[k];  sol.iin[src[k].n->idx] -= xac[k];
+            sol.iindc[src[k].p->idx] += xdc[k].real(); sol.iindc[src[k].n->idx] -= xdc[k].real();
         }
     }
+    sol.vdc.assign(std::max(nets, 1), 0.0);
+    for (size_t k = 0; k < dcv.size() && k < sol.vdc.size(); ++k) sol.vdc[k] = dcv[k].real();
 
     // 4) affichage
     for (BenchSocket *s : all) {
         bcplx v = sol.at(s);
-        s->setToolTip(QStringLiteral("%1 : %2 V  %3 deg (par rapport au neutre)")
-                          .arg(s->name).arg(fmt(std::abs(v), 1)).arg(fmt(std::arg(v) * 180.0 / 3.141592653589793, 0)));
+        QString tip = QStringLiteral("%1 : %2 V  %3 deg (par rapport au neutre)")
+                          .arg(s->name).arg(fmt(std::abs(v), 1)).arg(fmt(std::arg(v) * 180.0 / 3.141592653589793, 0));
+        if (std::abs(sol.dcAt(s)) > 1e-3) tip += QStringLiteral("   |   continu : %1 V").arg(fmt(sol.dcAt(s), 3));
+        s->setToolTip(tip);
     }
     QStringList msgs;
     for (BenchModule *m : m_modules) { m->warn.clear(); m->post(sol); m->update(); }
@@ -772,7 +1392,7 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
     setAttribute(Qt::WA_DeleteOnClose);
 
     m_scene = new BenchScene;
-    m_scene->setSceneRect(-40, -40, 1780, 1080);
+    m_scene->setSceneRect(-40, -40, 1780, 1330);
     m_scene->setBackgroundBrush(QColor(60, 62, 66));
     drawTable();
     m_view = new BenchView(m_scene);
@@ -798,6 +1418,17 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
     for (const QString &k : kinds()) add->addAction(k, this, [this, k] { addModule(k); });
     QMenu *edit = menuBar()->addMenu(QStringLiteral("&Banc"));
     edit->addAction(QStringLiteral("Supprimer la selection (Suppr)"), this, [this] { m_scene->onDeleteSelection(); });
+    edit->addAction(QStringLiteral("Ouvrir un banc..."), this, [this] {
+        const QString p = QFileDialog::getOpenFileName(this, QStringLiteral("Ouvrir un banc"), QString(), QStringLiteral("Banc Voltix (*.banc)"));
+        if (!p.isEmpty() && !loadFromFile(p)) QMessageBox::warning(this, QStringLiteral("Voltix"), QStringLiteral("Impossible de lire ce banc."));
+    });
+    edit->addAction(QStringLiteral("Enregistrer le banc..."), this, [this] {
+        QString p = QFileDialog::getSaveFileName(this, QStringLiteral("Enregistrer le banc"), QString(), QStringLiteral("Banc Voltix (*.banc)"));
+        if (p.isEmpty()) return;
+        if (!p.endsWith(".banc")) p += ".banc";
+        if (!saveToFile(p)) QMessageBox::warning(this, QStringLiteral("Voltix"), QStringLiteral("Impossible d'ecrire le fichier."));
+    });
+    edit->addSeparator();
     edit->addAction(QStringLiteral("Ranger les modules sur la table"), this, [this] { arrange(); });
     edit->addAction(QStringLiteral("Nouveau banc (tout effacer)"), this, [this] { clearAll(); });
     edit->addSeparator();
@@ -816,6 +1447,8 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
         connectSockets(a, b, m_wireColor->currentData().value<QColor>());
     };
     m_scene->onDeleteWire = [this](BenchWire *w) { removeWire(w); };
+    m_scene->onClampChanged = [this] { recompute(); };
+    m_scene->onHint = [this](const QString &t) { m_label->setText(t); };
     m_scene->onDeleteSelection = [this] {
         std::vector<BenchWire *> ws; std::vector<BenchModule *> ms;
         for (QGraphicsItem *it : m_scene->selectedItems()) {
@@ -829,7 +1462,7 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
 
     // banc de depart : pupitre + rheostat + pince
     addModule("Pupitre d'alimentation");
-    addModule("Pince multifonction");
+    addModule("Pince wattmetre 600 A (F205)");
     addModule("Oscilloscope 2 voies");
     addModule("Sonde differentielle");
     addModule("Rheostat 1400 ohm / 1 A");

@@ -10,7 +10,16 @@
 #include <QVector>
 #include <algorithm>
 
+struct SpiceMeter {
+    QString ref;               // V M1, AM2...
+    QString label;             // nom de la courbe
+    QString expr;              // expression ngspice : v(n1)-v(n2) ou i(vam_AM1)
+    QString unit;              // "V" ou "A"
+    SymbolItem *sym = nullptr;
+};
+
 struct SpiceResult {
+    QList<SpiceMeter> meters;         // instruments de mesure posés sur le schéma
     QString netlist;
     QString body;                     // netlist sans section .control
     QString legend;                   // correspondance nœud -> broches
@@ -133,8 +142,36 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
         const QString k = s->kind();
         static const QSet<QString> simulated = {"resistor", "capacitor", "inductor", "vsource",
                                                 "vsin", "vpulse", "diode", "npn", "pnp", "opamp",
-                                                "transformer"};
+                                                "transformer", "vmeter", "ammeter"};
         if (!simulated.contains(k)) continue;      // masse, étiquettes, électrotechnique
+
+        if (k == "vmeter" || k == "ammeter") {     // instruments : ne perturbent pas le circuit
+            QString id = s->ref;
+            id.remove(badChars);
+            if (id.isEmpty()) id = QString::number(c);
+            const QString a = nodeOf(c, 0), b = nodeOf(c, 1);
+            SpiceMeter m;
+            m.ref = s->ref;
+            m.sym = s;
+            QString nom = s->props.isEmpty() ? QString() : s->props[0].value.trimmed();
+            nom.remove(badChars);
+            m.label = nom.isEmpty() ? s->ref : nom;
+            if (k == "ammeter") {
+                const QString nm = "Vam_" + id;
+                lines << QString("%1 %2 %3 DC 0").arg(nm, a, b);   // source de 0 V : sert d'ampèremètre
+                m.expr = QString("i(%1)").arg(nm);
+                m.unit = "A";
+            } else {
+                lines << QString("Rvm_%1 %2 %3 1G").arg(id, a, b);  // 1 GΩ : ne charge rien, mais crée les nœuds
+                if (a == b)        m.expr = "0";
+                else if (b == "0") m.expr = QString("v(%1)").arg(a);       // v(0) n'existe pas en ngspice
+                else if (a == "0") m.expr = QString("-v(%1)").arg(b);
+                else               m.expr = QString("v(%1)-v(%2)").arg(a, b);
+                m.unit = "V";
+            }
+            r.meters << m;
+            continue;
+        }
 
         QString name = s->ref;
         name.remove(badChars);
@@ -197,7 +234,10 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
     }
 
     r.body = "* Voltix\n" + lines.join("\n") + "\n" + models.join("\n") + "\n";
-    r.netlist = r.body + ".control\nop\nprint all\n.endc\n.end\n";
+    QString opCtl = "op\nprint all\n";
+    for (int i = 0; i < r.meters.size(); ++i)
+        opCtl += QString("let m%1 = %2\nprint m%1\n").arg(i).arg(r.meters[i].expr);
+    r.netlist = r.body + ".control\n" + opCtl + ".endc\n.end\n";
 
     for (auto it = node.cbegin(); it != node.cend(); ++it) {
         if (!members.contains(it.key()))

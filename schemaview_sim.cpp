@@ -186,13 +186,21 @@ static void showPlots(QWidget *parent, const QString &title, const QList<PlotWid
 static QListWidget *addNodeList(QFormLayout *form, const SpiceResult &r)
 {
     auto *lw = new QListWidget;
-    lw->setMaximumHeight(140);
-    for (const QString &n : r.nodes) {
+    lw->setMaximumHeight(170);
+    for (int i = 0; i < r.meters.size(); ++i) {              // instruments posés sur le schéma
+        const SpiceMeter &m = r.meters[i];
+        auto *it = new QListWidgetItem(QString("%1   (%2 : %3)").arg(m.label, m.ref,
+                                                                      m.unit == "A" ? "ampèremètre" : "voltmètre"), lw);
+        it->setData(Qt::UserRole, QString("@%1").arg(i));
+        it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
+        it->setCheckState(Qt::Checked);
+    }
+    for (const QString &n : r.nodes) {                        // tensions de nœud (par rapport à la masse)
         const QString d = r.nodeDesc.value(n);
         auto *it = new QListWidgetItem(d.isEmpty() ? n : QString("%1   (%2)").arg(n, d), lw);
         it->setData(Qt::UserRole, n);
         it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
-        it->setCheckState(Qt::Checked);
+        it->setCheckState(r.meters.isEmpty() ? Qt::Checked : Qt::Unchecked);
     }
     form->addRow("Courbes à tracer :", lw);
     return lw;
@@ -205,6 +213,54 @@ static QStringList checkedNodes(const QListWidget *lw)
         if (lw->item(i)->checkState() == Qt::Checked)
             out << lw->item(i)->data(Qt::UserRole).toString();
     return out;
+}
+
+// Courbes choisies : instruments ("@i") ou tensions de nœud
+struct Picked {
+    QStringList vec;       // vecteurs ngspice à écrire
+    QStringList lets;      // définitions des instruments
+    QStringList names;     // légende
+    QStringList units;     // "V" ou "A"
+};
+
+static Picked pickCurves(const SpiceResult &r, const QStringList &sel)
+{
+    Picked p;
+    for (const QString &s : sel) {
+        if (s.startsWith('@')) {
+            const int i = s.mid(1).toInt();
+            if (i < 0 || i >= r.meters.size()) continue;
+            p.lets << QString("let m%1 = %2").arg(i).arg(r.meters[i].expr);
+            p.vec << QString("m%1").arg(i);
+            p.names << r.meters[i].label;
+            p.units << r.meters[i].unit;
+        } else {
+            p.vec << "v(" + s + ")";
+            p.names << "V(" + s + ")";
+            p.units << "V";
+        }
+    }
+    return p;
+}
+
+// une courbe par unité : tensions en haut, courants en dessous
+static void plotByUnit(QWidget *parent, const QString &title, const QString &xlabel,
+                       const QVector<double> &x, const QList<QVector<double>> &ys,
+                       const Picked &pk)
+{
+    QList<PlotWidget *> plots;
+    for (const QString &u : QStringList{"V", "A"}) {
+        QList<QVector<double>> sub;
+        QStringList nm;
+        for (int k = 0; k < ys.size(); ++k)
+            if (pk.units.value(k) == u) { sub << ys[k]; nm << pk.names[k]; }
+        if (sub.isEmpty()) continue;
+        auto *pl = new PlotWidget;
+        pl->setAxes(xlabel, u);
+        pl->setData(x, sub, nm);
+        plots << pl;
+    }
+    showPlots(parent, title, plots);
 }
 
 // ------------------------------------------------------------------
@@ -228,7 +284,23 @@ void SchemaView::simulateDC()
         return;
     }
 
-    const QString text = "=== Nœuds ===\n" + r.legend + "\n=== Netlist ===\n" + r.netlist
+    // valeurs des instruments : lignes « m0 = 1.2e+01 » du journal ngspice
+    QString mesures;
+    for (int i = 0; i < r.meters.size(); ++i) {
+        const SpiceMeter &m = r.meters[i];
+        const QRegularExpression re(QString("(?m)^\\s*m%1\\s*=\\s*(\\S+)").arg(i));
+        const QRegularExpressionMatch mt = re.match(run.log);
+        QString shown;
+        if (mt.hasMatch()) {
+            bool ok = false;
+            const double v = mt.captured(1).toDouble(&ok);
+            if (ok) shown = QString("%1 %2").arg(v, 0, 'g', 5).arg(m.unit);
+        }
+        if (auto *mi = dynamic_cast<MeterItem *>(m.sym)) { mi->reading = shown; mi->update(); }
+        mesures += QString("%1 (%2) = %3\n").arg(m.label, m.ref, shown.isEmpty() ? "?" : shown);
+    }
+    const QString text = (mesures.isEmpty() ? QString() : "=== Mesures ===\n" + mesures + "\n")
+                         + "=== Nœuds ===\n" + r.legend + "\n=== Netlist ===\n" + r.netlist
                          + "\n=== Résultat ngspice ===\n" + run.log;
 
     QDialog dlg(this);
@@ -285,10 +357,10 @@ void SchemaView::simulateTran()
         return;
     }
 
-    const QString vecs = "v(" + sel.join(") v(") + ")";
+    const Picked pk = pickCurves(r, sel);
     const QString net = r.body
-                        + QString(".control\ntran %1 %2 uic\nwrdata out.txt %3\n.endc\n.end\n")
-                              .arg(step, stop, vecs);
+                        + QString(".control\ntran %1 %2 uic\n%3\nwrdata out.txt %4\n.endc\n.end\n")
+                              .arg(step, stop, pk.lets.join('\n'), pk.vec.join(' '));
 
     const SpiceRun run = runNgspice(net, 30000);
     if (!run.err.isEmpty()) {
@@ -298,18 +370,12 @@ void SchemaView::simulateTran()
 
     QVector<double> t;
     QList<QVector<double>> series;
-    if (!parseColumns(run.out, int(sel.size()), t, series)) {
+    if (!parseColumns(run.out, int(pk.vec.size()), t, series)) {
         QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
         return;
     }
 
-    QStringList names;
-    for (const QString &n : sel)
-        names << "V(" + n + ")";
-    auto *plot = new PlotWidget;
-    plot->setAxes("s", "V");
-    plot->setData(t, series, names);
-    showPlots(this, "Simulation transitoire", {plot});
+    plotByUnit(this, "Simulation transitoire", "s", t, series, pk);
 }
 
 void SchemaView::simulateSweep()
@@ -367,10 +433,10 @@ void SchemaView::simulateSweep()
         return;
     }
 
-    const QString vecs = "v(" + sel.join(") v(") + ")";
+    const Picked pk = pickCurves(r, sel);
     const QString net = r.body
-                        + QString(".control\ndc %1 %2 %3 %4\nwrdata out.txt %5\n.endc\n.end\n")
-                              .arg(r.dcNames[cb->currentIndex()], a, b, c, vecs);
+                        + QString(".control\ndc %1 %2 %3 %4\n%5\nwrdata out.txt %6\n.endc\n.end\n")
+                              .arg(r.dcNames[cb->currentIndex()], a, b, c, pk.lets.join('\n'), pk.vec.join(' '));
 
     const SpiceRun run = runNgspice(net, 30000);
     if (!run.err.isEmpty()) {
@@ -380,18 +446,12 @@ void SchemaView::simulateSweep()
 
     QVector<double> x;
     QList<QVector<double>> series;
-    if (!parseColumns(run.out, int(sel.size()), x, series)) {
+    if (!parseColumns(run.out, int(pk.vec.size()), x, series)) {
         QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
         return;
     }
 
-    QStringList names;
-    for (const QString &n : sel)
-        names << "V(" + n + ")";
-    auto *plot = new PlotWidget;
-    plot->setAxes("V", "V");
-    plot->setData(x, series, names);
-    showPlots(this, "Balayage DC : " + cb->currentText(), {plot});
+    plotByUnit(this, "Balayage DC : " + cb->currentText(), "V", x, series, pk);
 }
 
 void SchemaView::simulateAC()
@@ -448,12 +508,13 @@ void SchemaView::simulateAC()
         return;
     }
 
+    const Picked pk = pickCurves(r, sel);
     QStringList vecs;
-    for (const QString &n : sel)
-        vecs << QString("db(v(%1)) phase(v(%1))").arg(n);
+    for (const QString &v : pk.vec)
+        vecs << QString("db(%1) phase(%1)").arg(v);
     const QString net = r.body
-                        + QString(".control\nac dec %1 %2 %3\nwrdata out.txt %4\n.endc\n.end\n")
-                              .arg(np, f1, f2, vecs.join(' '));
+                        + QString(".control\nac dec %1 %2 %3\n%4\nwrdata out.txt %5\n.endc\n.end\n")
+                              .arg(np, f1, f2, pk.lets.join('\n'), vecs.join(' '));
 
     const SpiceRun run = runNgspice(net, 30000);
     if (!run.err.isEmpty()) {
@@ -463,7 +524,7 @@ void SchemaView::simulateAC()
 
     QVector<double> f;
     QList<QVector<double>> raw;
-    const int nodes = int(sel.size());
+    const int nodes = int(pk.vec.size());
     if (!parseColumns(run.out, 2 * nodes, f, raw)) {
         QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
         return;
@@ -481,7 +542,7 @@ void SchemaView::simulateAC()
             while (ph[i] - ph[i - 1] < -180.0) ph[i] += 360.0;
         }
         phase << ph;
-        names << "V(" + sel[k] + ")";
+        names << pk.names[k];
     }
 
     auto *pg = new PlotWidget;

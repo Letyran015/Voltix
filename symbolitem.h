@@ -437,6 +437,62 @@ protected:
                                   QPointF(34, 7), QPointF(18, 7)}));
     }
 };
+
+// ---------- Instruments de mesure : voltmètre (V) et ampèremètre (A) ----------
+// Voltmètre : mesure U(broche +) - U(broche -), sans perturber le circuit.
+// Ampèremètre : à placer EN SÉRIE ; mesure le courant qui entre par la broche + et sort par la broche -.
+class MeterItem : public SymbolItem
+{
+public:
+    explicit MeterItem(bool current) : m_current(current)
+    {
+        props = {
+                  {"Nom", "", "", "Nom de la courbe tracée (facultatif)", false},
+                  };
+        showRef = true;
+    }
+    QString reading;                                   // dernière valeur calculée (point de fonctionnement)
+    QString prefix() const override { return m_current ? "AM" : "VM"; }
+    QString kind() const override { return m_current ? "ammeter" : "vmeter"; }
+    QString title() const override { return m_current ? "Ampèremètre" : "Voltmètre"; }
+    int pinCount() const override { return 2; }
+    QPointF pinLocal(int i) const override { return i == 0 ? QPointF(-40, 0) : QPointF(40, 0); }
+    QStringList labelLines() const override
+    {
+        QStringList l;
+        const QString nom = props.isEmpty() ? QString() : props[0].value.trimmed();
+        if (!nom.isEmpty()) l << nom;
+        else if (showRef && !ref.isEmpty()) l << ref;
+        if (!reading.isEmpty()) l << reading;
+        return l;
+    }
+protected:
+    QRectF bodyRect() const override { return QRectF(-44, -24, 88, 48); }
+    void drawBody(QPainter *p) const override
+    {
+        p->drawLine(-40, 0, -20, 0);
+        p->drawLine(20, 0, 40, 0);
+        p->drawEllipse(QPointF(0, 0), 20, 20);
+        p->save();
+        p->rotate(-rotation());                          // lettre toujours droite
+        QFont f = p->font();
+        f.setPixelSize(20);
+        f.setBold(true);
+        p->setFont(f);
+        p->drawText(QRectF(-14, -14, 28, 28), Qt::AlignCenter, m_current ? "A" : "V");
+        p->restore();
+        p->drawLine(-36, -9, -30, -9);                   // repère de la broche +
+        p->drawLine(-33, -12, -33, -6);
+        if (m_current) {                                 // sens du courant : broche + vers broche -
+            p->drawLine(-10, 26, 10, 26);
+            p->drawLine(10, 26, 5, 22);
+            p->drawLine(10, 26, 5, 30);
+        }
+    }
+private:
+    bool m_current;
+};
+
 SymbolItem *makeElectroSymbol(const QString &kind);   // défini dans electro.cpp
 SymbolItem *makeElectroSymbol(const QString &kind);
 SymbolItem *makeElectroSymbol2(const QString &kind);
@@ -444,6 +500,8 @@ SymbolItem *makeElectroSymbol2(const QString &kind);
 inline SymbolItem *makeSymbol(const QString &kind)
 {
     if (kind == "label")     return new LabelItem;
+    if (kind == "vmeter")    return new MeterItem(false);
+    if (kind == "ammeter")   return new MeterItem(true);
     if (kind == "resistor")  return new ResistorItem;
     if (kind == "capacitor") return new CapacitorItem;
     if (kind == "diode")     return new DiodeItem;
