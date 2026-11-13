@@ -8,6 +8,7 @@
 #include <QStringList>
 #include <QTransform>
 #include <cmath>
+#include <QPair>
 
 class WireItem;
 
@@ -36,7 +37,14 @@ public:
     virtual QString title() const = 0;       // nom affiché dans la fenêtre de propriétés
     virtual int pinCount() const = 0;
     virtual QPointF pinLocal(int i) const = 0;
-    QPointF pinScene(int i) const { return mapToScene(pinLocal(i)); }
+    virtual bool pinActive(int) const { return true; }
+    virtual QList<QPair<int, int>> internalLinks() const { return {}; }
+    QPointF pinScene(int i) const
+    {
+        return pinActive(i) ? mapToScene(pinLocal(i)) : QPointF(-4800 + 20 * (i % 200), -4800);
+    }
+    void propsChanged() { prepareGeometryChange(); update(); updateWires(); }
+    static inline bool hidePins = false;      // vrai pendant l'export PDF
 
     void attach(WireItem *w) { if (!m_wires.contains(w)) m_wires.append(w); }
     void detach(WireItem *w) { m_wires.removeAll(w); }
@@ -71,10 +79,13 @@ public:
         p->setBrush(Qt::NoBrush);
         drawBody(p);
 
-        p->setPen(Qt::NoPen);
-        p->setBrush(QColor(200, 0, 0));
-        for (int i = 0; i < pinCount(); ++i)
-            p->drawEllipse(pinLocal(i), 3, 3);
+        if (!hidePins) {
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(200, 0, 0));
+            for (int i = 0; i < pinCount(); ++i)
+                if (pinActive(i))
+                    p->drawEllipse(pinLocal(i), 3, 3);
+        }
 
         // Texte : on annule la rotation pour qu'il reste horizontal
         const QStringList lines = labelLines();
@@ -427,6 +438,8 @@ protected:
     }
 };
 SymbolItem *makeElectroSymbol(const QString &kind);   // défini dans electro.cpp
+SymbolItem *makeElectroSymbol(const QString &kind);
+SymbolItem *makeElectroSymbol2(const QString &kind);
 
 inline SymbolItem *makeSymbol(const QString &kind)
 {
@@ -447,5 +460,7 @@ inline SymbolItem *makeSymbol(const QString &kind)
     if (kind == "pnp")       return new BjtItem(true);
     if (kind == "opamp")     return new OpAmpItem;
     if (kind == "ground")    return new GroundItem;
-    return makeElectroSymbol(kind);
+    if (SymbolItem *s = makeElectroSymbol(kind))
+        return s;
+    return makeElectroSymbol2(kind);
 }

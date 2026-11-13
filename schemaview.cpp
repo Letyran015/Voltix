@@ -1,44 +1,35 @@
 #include "schemaview.h"
 #include "symbolitem.h"
 #include "wireitem.h"
+#include "wiredialog.h"
 #include "propertiesdialog.h"
-#include "plotwidget.h"
+#include "sheet.h"
 #include "spice.h"
 #include "core.h"
 
-#include <QComboBox>
-#include <QCoreApplication>
-#include <QDebug>
-#include <QDialog>
-#include <QDialogButtonBox>
+#include <QTimer>
+#include <QDate>
 #include <QFile>
-#include <QFontDatabase>
-#include <QFormLayout>
 #include <QGraphicsScene>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
-#include <QLineEdit>
 #include <QMap>
+#include <QMarginsF>
 #include <QMessageBox>
 #include <QMouseEvent>
-#include <QPlainTextEdit>
-#include <QProcess>
-#include <QProcessEnvironment>
-#include <QRegularExpression>
+#include <QPageLayout>
+#include <QPageSize>
+#include <QPainter>
+#include <QPdfWriter>
 #include <QScrollBar>
-#include <QStandardPaths>
-#include <QTemporaryDir>
-#include <QVBoxLayout>
+#include <QSet>
 #include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
-#include <QDir>
-#include <QListWidget>
-
-#include <QSet>
+#include <functional>
 
 static const int GRID = 20;
 
@@ -54,8 +45,16 @@ static QPointF ortho(const QPointF &from, const QPointF &to)
     return QPointF(from.x(), to.y());
 }
 
+static QString propOf(const SymbolItem *s, const QString &name)
+{
+    for (const Prop &p : s->props)
+        if (p.name == name)
+            return p.value.trimmed();
+    return QString();
+}
+
 // ------------------------------------------------------------------
-//  Construction, fond et zoom
+//  Construction, fond, zoom
 // ------------------------------------------------------------------
 SchemaView::SchemaView(QWidget *parent) : QGraphicsView(parent)
 {
@@ -68,28 +67,29 @@ SchemaView::SchemaView(QWidget *parent) : QGraphicsView(parent)
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
+    Folio f;
+    f.title = "Folio 1";
+    m_folios.append(f);
+    ensureSheet();
     m_currentState = serialize();
-    m_saved = m_currentState;
+    m_folios[0].state = m_currentState;
+    m_dirty = false;
 }
 
 void SchemaView::drawBackground(QPainter *p, const QRectF &rect)
 {
-    p->fillRect(rect, Qt::white);
-    if (transform().m11() < 0.3)
+    p->fillRect(rect, QColor(226, 229, 234));
+    if (m_sheetOn || transform().m11() < 0.3)     // avec la feuille, la grille est dessinée par elle
         return;
-
-    p->setPen(QPen(QColor(170, 170, 170), 0));
-    const int x0 = qFloor(rect.left() / GRID);
-    const int x1 = qCeil(rect.right() / GRID);
-    const int y0 = qFloor(rect.top() / GRID);
-    const int y1 = qCeil(rect.bottom() / GRID);
+    p->setPen(QPen(QColor(150, 155, 165), 0));
+    const int x0 = qFloor(rect.left() / GRID), x1 = qCeil(rect.right() / GRID);
+    const int y0 = qFloor(rect.top() / GRID), y1 = qCeil(rect.bottom() / GRID);
     for (int ix = x0; ix <= x1; ++ix)
         for (int iy = y0; iy <= y1; ++iy)
             p->drawPoint(QPointF(ix * GRID, iy * GRID));
 }
 
-// points de jonction : extrémité d'un fil posée sur un autre fil, ou 3 extrémités au même endroit
-void SchemaView::drawForeground(QPainter *p, const QRectF &)
+void SchemaView::drawJunctions(QPainter *p) const
 {
     struct End { QPointF pt; WireItem *w; };
     QList<WireItem *> wires;
@@ -127,6 +127,11 @@ void SchemaView::drawForeground(QPainter *p, const QRectF &)
     }
 }
 
+void SchemaView::drawForeground(QPainter *p, const QRectF &)
+{
+    drawJunctions(p);
+}
+
 void SchemaView::wheelEvent(QWheelEvent *e)
 {
     const qreal factor = e->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15;
@@ -136,8 +141,149 @@ void SchemaView::wheelEvent(QWheelEvent *e)
     scale(factor, factor);
 }
 
+void SchemaView::zoomFit()
+{
+    const QSizeF sz = SheetItem::paperSize(m_pi.paper);
+    fitInView(QRectF(QPointF(0, 0), sz).adjusted(-30, -30, 30, 30), Qt::KeepAspectRatio);
+}
+
+void SchemaView::setSheetEnabled(bool on)
+{
+    if (on == m_sheetOn)
+        return;
+    m_sheetOn = on;
+    applySheet(m_folio);
+    if (on)
+        QTimer::singleShot(0, this, [this] { zoomFit(); });
+    else {
+        resetTransform();
+        centerOn(600, 420);
+    }
+    scene()->update();
+    viewport()->update();
+}
 // ------------------------------------------------------------------
-//  Historique (annuler / rétablir) et sérialisation
+//  Feuille et folios
+// ------------------------------------------------------------------
+void SchemaView::ensureSheet()
+{
+    m_sheet = new SheetItem;
+    scene()->addItem(m_sheet);
+    applySheet(m_folio);
+}
+
+void SchemaView::applySheet(int index)
+{
+    if (!m_sheet || m_folios.isEmpty())
+        return;
+    const QString t = (index >= 0 && index < m_folios.size()) ? m_folios[index].title : QString();
+    m_sheet->setInfo(m_pi, index, int(m_folios.size()), t);
+    m_sheet->setVisible(m_sheetOn || m_exporting);   // l'export PDF utilise toujours la feuille
+    m_sheet->setShowGrid(!m_exporting);
+}
+
+QString SchemaView::folioTitle(int i) const
+{
+    return (i >= 0 && i < m_folios.size()) ? m_folios[i].title : QString();
+}
+
+void SchemaView::storeCurrent()
+{
+    if (m_folio < 0 || m_folio >= m_folios.size())
+        return;
+    Folio &f = m_folios[m_folio];
+    f.state = m_currentState;
+    f.undo = m_undo;
+    f.redo = m_redo;
+}
+
+void SchemaView::loadFolio(int i)
+{
+    m_folio = i;
+    const Folio &f = m_folios[i];
+    m_currentState = f.state;
+    m_undo = f.undo;
+    m_redo = f.redo;
+    deserialize(m_currentState, false);
+    applySheet(i);
+}
+
+void SchemaView::setFolio(int i)
+{
+    if (i < 0 || i >= m_folios.size() || i == m_folio)
+        return;
+    commit();
+    storeCurrent();
+    loadFolio(i);
+    emit foliosChanged();
+    emit stateChanged();
+}
+
+void SchemaView::addFolio()
+{
+    commit();
+    storeCurrent();
+    Folio f;
+    f.title = QString("Folio %1").arg(m_folios.size() + 1);
+    f.state = emptyState();
+    m_folios.append(f);
+    m_dirty = true;
+    loadFolio(int(m_folios.size()) - 1);
+    emit foliosChanged();
+    emit stateChanged();
+}
+
+bool SchemaView::removeFolio()
+{
+    if (m_folios.size() <= 1)
+        return false;
+    m_folios.removeAt(m_folio);
+    m_dirty = true;
+    loadFolio(qMin(m_folio, int(m_folios.size()) - 1));
+    emit foliosChanged();
+    emit stateChanged();
+    return true;
+}
+
+void SchemaView::renameFolio(int i, const QString &title)
+{
+    if (i < 0 || i >= m_folios.size())
+        return;
+    m_folios[i].title = title.trimmed();
+    m_dirty = true;
+    if (i == m_folio)
+        applySheet(i);
+    emit foliosChanged();
+    emit stateChanged();
+}
+
+void SchemaView::setProject(const ProjectInfo &pi)
+{
+    const bool paperChanged = pi.paper != m_pi.paper;
+    m_pi = pi;
+    m_dirty = true;
+    applySheet(m_folio);
+    if (paperChanged)
+        zoomFit();
+    emit stateChanged();
+}
+
+// exécute fn pour chaque folio (la scène affiche le folio i pendant l'appel)
+void SchemaView::forEachFolio(const std::function<void(int)> &fn)
+{
+    commit();
+    storeCurrent();
+    for (int i = 0; i < m_folios.size(); ++i) {
+        deserialize(m_folios[i].state, false);
+        applySheet(i);
+        fn(i);
+    }
+    deserialize(m_folios[m_folio].state, false);
+    applySheet(m_folio);
+}
+
+// ------------------------------------------------------------------
+//  Historique et sérialisation d'un folio
 // ------------------------------------------------------------------
 void SchemaView::collect(QList<SymbolItem *> &syms, QList<WireItem *> &wires) const
 {
@@ -146,12 +292,30 @@ void SchemaView::collect(QList<SymbolItem *> &syms, QList<WireItem *> &wires) co
         if (auto *s = dynamic_cast<SymbolItem *>(it))
             syms << s;
         else if (auto *w = dynamic_cast<WireItem *>(it)) {
-            if (w != m_current)          // on ignore le fil en cours de tracé
+            if (w != m_current)
                 wires << w;
         }
     }
     std::sort(syms.begin(), syms.end(),
               [](SymbolItem *a, SymbolItem *b) { return a->index < b->index; });
+}
+
+QByteArray SchemaView::emptyState()
+{
+    QJsonObject o;
+    o["format"] = "voltix";
+    o["version"] = 1;
+    o["components"] = QJsonArray();
+    o["wires"] = QJsonArray();
+    return QJsonDocument(o).toJson();
+}
+
+bool SchemaView::validState(const QByteArray &data)
+{
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(data, &err);
+    return err.error == QJsonParseError::NoError && doc.isObject()
+           && doc.object()["format"].toString() == "voltix";
 }
 
 QByteArray SchemaView::serialize() const
@@ -203,6 +367,10 @@ QByteArray SchemaView::serialize() const
         }
         QJsonObject o;
         o["points"] = pts;
+        o["nature"] = w->nature();
+        o["color"] = w->color().name();
+        o["section"] = w->section();
+        o["mark"] = w->mark();
         if (w->symA()) o["a"] = endToJson(w->symA(), w->pinA());
         if (w->symB()) o["b"] = endToJson(w->symB(), w->pinB());
         ws.append(o);
@@ -216,25 +384,43 @@ QByteArray SchemaView::serialize() const
     return QJsonDocument(root).toJson();
 }
 
-void SchemaView::resetScene()
+void SchemaView::resetCounters()
 {
-    cancelWire();
-    scene()->clear();
     m_total = 0;
     m_counts.clear();
 }
 
+// met à jour les compteurs de repères avec un folio (les repères sont uniques dans tout le projet)
+void SchemaView::scanCounters(const QByteArray &data)
+{
+    const QJsonArray comps = QJsonDocument::fromJson(data).object()["components"].toArray();
+    for (const QJsonValue &v : comps) {
+        const QJsonObject o = v.toObject();
+        m_total = qMax(m_total, o["index"].toInt());
+        const QString ref = o["ref"].toString();
+        int d = int(ref.size());
+        while (d > 0 && ref[d - 1].isDigit())
+            --d;
+        if (d < ref.size())
+            m_counts[ref.left(d)] = qMax(m_counts.value(ref.left(d)), ref.mid(d).toInt());
+    }
+}
+
+void SchemaView::resetScene()
+{
+    cancelWire();
+    m_sheet = nullptr;
+    scene()->clear();
+    ensureSheet();
+}
+
 bool SchemaView::deserialize(const QByteArray &data, bool recenter)
 {
-    QJsonParseError err;
-    const QJsonDocument doc = QJsonDocument::fromJson(data, &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject())
+    if (!validState(data))
         return false;
-    const QJsonObject root = doc.object();
-    if (root["format"].toString() != "voltix")
-        return false;
+    const QJsonObject root = QJsonDocument::fromJson(data).object();
 
-    resetScene();                           // le contenu est valide : on peut vider la scène
+    resetScene();
 
     QList<SymbolItem *> syms;
     const QJsonArray comps = root["components"].toArray();
@@ -302,12 +488,18 @@ bool SchemaView::deserialize(const QByteArray &data, bool recenter)
 
         auto *w = new WireItem;
         w->setPoints(poly);
+        w->setNature(o["nature"].toString("OTHER"));
+        const QColor c(o["color"].toString());
+        if (c.isValid())
+            w->setColor(c);
+        w->setSection(o["section"].toString());
+        w->setMark(o["mark"].toString());
         scene()->addItem(w);
         w->setEnds(sa, pa, sb, pb);
     }
 
-    if (recenter && !scene()->items().isEmpty())
-        centerOn(scene()->itemsBoundingRect().center());
+    if (recenter)
+        zoomFit();
     return true;
 }
 
@@ -321,6 +513,7 @@ void SchemaView::commit()
         m_undo.removeFirst();
     m_redo.clear();
     m_currentState = now;
+    m_dirty = true;
     emit stateChanged();
 }
 
@@ -331,6 +524,7 @@ void SchemaView::undo()
     m_redo.append(m_currentState);
     m_currentState = m_undo.takeLast();
     deserialize(m_currentState, false);
+    m_dirty = true;
     emit stateChanged();
 }
 
@@ -341,43 +535,191 @@ void SchemaView::redo()
     m_undo.append(m_currentState);
     m_currentState = m_redo.takeLast();
     deserialize(m_currentState, false);
+    m_dirty = true;
     emit stateChanged();
 }
 
+// ------------------------------------------------------------------
+//  Projet : nouveau, enregistrement, chargement, PDF
+// ------------------------------------------------------------------
 void SchemaView::clearAll()
 {
-    resetScene();
+    const ProjectInfo old = m_pi;
+    m_pi = ProjectInfo();
+    m_pi.company = old.company;
+    m_pi.address = old.address;
+    m_pi.author = old.author;
+    m_pi.paper = old.paper;
+
+    m_folios.clear();
+    Folio f;
+    f.title = "Folio 1";
+    f.state = emptyState();
+    m_folios.append(f);
+    m_folio = 0;
     m_undo.clear();
     m_redo.clear();
-    m_currentState = serialize();
-    m_saved = m_currentState;
+    m_currentState = f.state;
+    resetCounters();
+    resetScene();
+    applySheet(0);
+    m_dirty = false;
+    zoomFit();
+    emit foliosChanged();
     emit stateChanged();
 }
 
 bool SchemaView::saveToFile(const QString &path)
 {
     commit();
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly))
+    storeCurrent();
+    m_pi.modified = QDate::currentDate().toString(Qt::ISODate);
+    applySheet(m_folio);
+
+    QJsonObject pj;
+    pj["paper"] = m_pi.paper;
+    pj["company"] = m_pi.company;
+    pj["address"] = m_pi.address;
+    pj["title"] = m_pi.title;
+    pj["author"] = m_pi.author;
+    pj["revision"] = m_pi.revision;
+    pj["created"] = m_pi.created;
+    pj["modified"] = m_pi.modified;
+
+    QJsonArray fl;
+    for (const Folio &fo : std::as_const(m_folios)) {
+        QJsonObject o;
+        o["title"] = fo.title;
+        o["data"] = QJsonDocument::fromJson(fo.state).object();
+        fl.append(o);
+    }
+
+    QJsonObject root;
+    root["format"] = "voltix";
+    root["version"] = 2;
+    root["project"] = pj;
+    root["folios"] = fl;
+    root["current"] = m_folio;
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
         return false;
-    f.write(m_currentState);
-    f.close();
-    m_saved = m_currentState;
+    file.write(QJsonDocument(root).toJson());
+    file.close();
+    m_dirty = false;
     emit stateChanged();
     return true;
 }
 
 bool SchemaView::loadFromFile(const QString &path)
 {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
         return false;
-    if (!deserialize(f.readAll(), true))
+    const QByteArray raw = file.readAll();
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
         return false;
-    m_undo.clear();
-    m_redo.clear();
-    m_currentState = serialize();
-    m_saved = m_currentState;
+    const QJsonObject root = doc.object();
+    if (root["format"].toString() != "voltix")
+        return false;
+
+    QList<Folio> folios;
+    ProjectInfo pi;
+    int cur = 0;
+    if (root.contains("folios")) {                          // format 2
+        const QJsonObject pj = root["project"].toObject();
+        pi.paper = pj["paper"].toString("A4");
+        pi.company = pj["company"].toString();
+        pi.address = pj["address"].toString();
+        pi.title = pj["title"].toString();
+        pi.author = pj["author"].toString();
+        pi.revision = pj["revision"].toString("A");
+        pi.created = pj["created"].toString(pi.created);
+        pi.modified = pj["modified"].toString(pi.modified);
+        const QJsonArray fl = root["folios"].toArray();
+        for (const QJsonValue &v : fl) {
+            const QJsonObject fo = v.toObject();
+            QJsonObject data = fo["data"].toObject();
+            data["format"] = "voltix";
+            Folio f;
+            f.title = fo["title"].toString(QString("Folio %1").arg(folios.size() + 1));
+            f.state = QJsonDocument(data).toJson();
+            folios.append(f);
+        }
+        cur = root["current"].toInt(0);
+    } else {                                                // ancien format : un seul folio
+        Folio f;
+        f.title = "Folio 1";
+        f.state = raw;
+        folios.append(f);
+    }
+    if (folios.isEmpty())
+        return false;
+    for (const Folio &f : std::as_const(folios))
+        if (!validState(f.state))
+            return false;
+    if (pi.paper != "A3")
+        pi.paper = "A4";
+    if (cur < 0 || cur >= folios.size())
+        cur = 0;
+
+    m_pi = pi;
+    m_folios = folios;
+    resetCounters();
+    for (const Folio &f : std::as_const(m_folios))
+        scanCounters(f.state);
+    loadFolio(cur);
+    m_dirty = false;
+    zoomFit();
+    emit foliosChanged();
+    emit stateChanged();
+    return true;
+}
+
+bool SchemaView::exportPdf(const QString &path)
+{
+    commit();
+    storeCurrent();
+    m_pi.modified = QDate::currentDate().toString(Qt::ISODate);
+
+    QPdfWriter w(path);
+    w.setPageSize(QPageSize(m_pi.paper == "A3" ? QPageSize::A3 : QPageSize::A4));
+    w.setPageOrientation(QPageLayout::Landscape);
+    w.setPageMargins(QMarginsF(0, 0, 0, 0));
+    w.setResolution(300);
+    w.setTitle(m_pi.title.isEmpty() ? QString("Schéma Voltix") : m_pi.title);
+    w.setCreator("Voltix");
+
+    QPainter painter(&w);
+    if (!painter.isActive())
+        return false;
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    m_exporting = true;
+    SymbolItem::hidePins = true;
+    const QRectF source(QPointF(0, 0), SheetItem::paperSize(m_pi.paper));
+    for (int i = 0; i < m_folios.size(); ++i) {
+        if (i > 0)
+            w.newPage();
+        deserialize(m_folios[i].state, false);
+        applySheet(i);
+        scene()->clearSelection();
+        const QRectF target(painter.viewport());
+        scene()->render(&painter, target, source, Qt::KeepAspectRatio);
+
+        const qreal sc = qMin(target.width() / source.width(), target.height() / source.height());
+        painter.save();
+        painter.translate(target.center() - QPointF(source.width() * sc / 2, source.height() * sc / 2));
+        painter.scale(sc, sc);
+        drawJunctions(&painter);                       // les points de jonction
+        painter.restore();
+    }
+    painter.end();
+    SymbolItem::hidePins = false;
+    m_exporting = false;
+    loadFolio(m_folio);
     emit stateChanged();
     return true;
 }
@@ -392,6 +734,8 @@ bool SchemaView::pinAt(const QPointF &p, SymbolItem *&sym, int &pin) const
         auto *s = dynamic_cast<SymbolItem *>(it);
         if (!s) continue;
         for (int i = 0; i < s->pinCount(); ++i) {
+            if (!s->pinActive(i))
+                continue;
             if (QLineF(s->pinScene(i), p).length() < 4) {
                 sym = s;
                 pin = i;
@@ -425,7 +769,7 @@ void SchemaView::wireClick(const QPointF &scenePos)
 {
     const QPointF p = snap(scenePos);
 
-    if (!m_current) {                       // premier clic : début du fil
+    if (!m_current) {
         m_pts.clear();
         m_pts << p << p;
         m_current = new WireItem;
@@ -438,11 +782,11 @@ void SchemaView::wireClick(const QPointF &scenePos)
 
     SymbolItem *s = nullptr;
     int pin = -1;
-    if (pinAt(p, s, pin) || onWire(p)) {    // clic sur une broche ou sur un fil : on termine
+    if (pinAt(p, s, pin) || onWire(p)) {
         if (p == last)
             return;
         if (!qFuzzyCompare(p.x() + 1, last.x() + 1) && !qFuzzyCompare(p.y() + 1, last.y() + 1)) {
-            m_pts.last() = QPointF(p.x(), last.y());   // coude
+            m_pts.last() = QPointF(p.x(), last.y());
             m_pts << p;
         } else {
             m_pts.last() = p;
@@ -455,8 +799,8 @@ void SchemaView::wireClick(const QPointF &scenePos)
     const QPointF end = ortho(last, p);
     if (end == last)
         return;
-    m_pts.last() = end;                     // fige le segment
-    m_pts << end;                           // nouveau segment d'aperçu
+    m_pts.last() = end;
+    m_pts << end;
     m_current->setPoints(m_pts);
 }
 
@@ -474,7 +818,7 @@ void SchemaView::finishWire(bool keepLast)
     if (!m_current)
         return;
     if (!keepLast)
-        m_pts.removeLast();                 // retire le segment d'aperçu
+        m_pts.removeLast();
 
     if (m_pts.size() < 2) {
         cancelWire();
@@ -487,6 +831,8 @@ void SchemaView::finishWire(bool keepLast)
     pinAt(m_pts.last(), sb, pb);
     m_current->setPoints(m_pts);
     m_current->setEnds(sa, pa, sb, pb);
+    m_current->setNature(m_wireNature);             // nature et section choisies dans la barre Fils
+    m_current->setSection(m_wireSection);
     m_current = nullptr;
     m_pts.clear();
     commit();
@@ -542,7 +888,7 @@ void SchemaView::mouseReleaseEvent(QMouseEvent *e)
     if (m_wireMode)
         return;
     QGraphicsView::mouseReleaseEvent(e);
-    commit();                               // déplacement d'un composant, etc.
+    commit();
 }
 
 void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
@@ -554,8 +900,15 @@ void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
         return;
     }
     if (e->button() == Qt::LeftButton) {
-        if (auto *s = dynamic_cast<SymbolItem *>(itemAt(pos))) {
+        QGraphicsItem *hit = itemAt(pos);
+        if (auto *s = dynamic_cast<SymbolItem *>(hit)) {
             PropertiesDialog dlg(s, this);
+            dlg.exec();
+            commit();
+            return;
+        }
+        if (auto *w = dynamic_cast<WireItem *>(hit)) {
+            WireDialog dlg(w, this);
             dlg.exec();
             commit();
             return;
@@ -575,81 +928,10 @@ void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
     QGraphicsView::mouseDoubleClickEvent(e);
 }
 
-static QString propOf(const SymbolItem *s, const QString &name)
-{
-    for (const Prop &p : s->props)
-        if (p.name == name)
-            return p.value.trimmed();
-    return QString();
-}
-
-void SchemaView::verifyElectrical()
-{
-    QList<SymbolItem *> syms;
-    QList<WireItem *> wires;
-    collect(syms, wires);
-
-    QSet<QString> coils, contactors, thermals, used;
-    QStringList issues;
-
-    for (const SymbolItem *s : std::as_const(syms)) {
-        const QString k = s->kind(), r = s->ref.trimmed().toLower();
-        if (k == "coil" || k == "relay") {
-            if (coils.contains(r))
-                issues << QString("Bobine « %1 » en double.").arg(s->ref);
-            coils << r;
-        } else if (k == "contactor3") {
-            contactors << r;
-        } else if (k == "thermal3") {
-            thermals << r;
-        }
-    }
-
-    for (const SymbolItem *s : std::as_const(syms)) {
-        const QString k = s->kind();
-        if (k != "contact_no" && k != "contact_nc" && k != "thermal_nc")
-            continue;
-        const QString ref = propOf(s, "Bobine").toLower();
-        if (ref.isEmpty()) {
-            issues << QString("Contact sans bobine associée (%1).").arg(s->ref);
-            continue;
-        }
-        const bool ok = (k == "thermal_nc") ? thermals.contains(ref) : coils.contains(ref);
-        if (!ok)
-            issues << QString("Contact « %1 » : aucun repère « %2 » dans le schéma.")
-                          .arg(s->ref, propOf(s, "Bobine"));
-        used << ref;
-    }
-
-    for (const SymbolItem *s : std::as_const(syms)) {
-        const QString k = s->kind(), r = s->ref.trimmed().toLower();
-        if ((k == "coil" || k == "relay") && !used.contains(r) && !contactors.contains(r))
-            issues << QString("Bobine « %1 » : aucun contact ni pôle de puissance associé.")
-                          .arg(s->ref);
-        if (k == "thermal3" && !used.contains(r))
-            issues << QString("Relais thermique « %1 » : aucun contact thermique associé.")
-                          .arg(s->ref);
-    }
-
-    Schema *sc = buildSchema(syms, wires);
-    QStringList floating;
-    for (int c = 0; c < syms.size(); ++c)
-        for (int i = 0; i < syms[c]->pinCount(); ++i)
-            if (schema_pin_net(sc, c, i) < 0)
-                floating << QString("%1.%2").arg(syms[c]->ref).arg(i + 1);
-    schema_free(sc);
-    if (!floating.isEmpty())
-        issues << "Broches non connectées : " + floating.join(", ");
-
-    QMessageBox::information(this, "Vérification du schéma",
-                             issues.isEmpty() ? QString("Aucun problème détecté.")
-                                              : issues.join("\n"));
-}
-
 void SchemaView::keyPressEvent(QKeyEvent *e)
 {
     if (e->modifiers() & (Qt::ControlModifier | Qt::AltModifier)) {
-        QGraphicsView::keyPressEvent(e);      // laisse passer les raccourcis du menu
+        QGraphicsView::keyPressEvent(e);
         return;
     }
     if (e->key() == Qt::Key_W) {
@@ -676,20 +958,21 @@ void SchemaView::keyPressEvent(QKeyEvent *e)
 }
 
 // ------------------------------------------------------------------
-//  Netlist (touche N)
+//  Netlist (touche N) et vérification (F9)
 // ------------------------------------------------------------------
 void SchemaView::dumpNets()
 {
     QList<SymbolItem *> syms;
     QList<WireItem *> wires;
     collect(syms, wires);
-
     Schema *sc = buildSchema(syms, wires);
 
     QMap<int, QStringList> nets;
     QStringList floating;
     for (int c = 0; c < syms.size(); ++c) {
         for (int i = 0; i < syms[c]->pinCount(); ++i) {
+            if (!syms[c]->pinActive(i))
+                continue;
             const QString name = QString("%1.%2").arg(syms[c]->ref).arg(i + 1);
             const int n = schema_pin_net(sc, c, i);
             if (n >= 0) nets[n] << name;
@@ -698,479 +981,101 @@ void SchemaView::dumpNets()
     }
 
     QString text = QString("%1 net(s)\n\n").arg(nets.size());
-    for (auto it = nets.cbegin(); it != nets.cend(); ++it) {
-        const bool gnd = !it.value().filter("GND").isEmpty();
-        text += QString("Net %1%2 : %3\n")
-                    .arg(it.key())
-                    .arg(gnd ? " (masse)" : "")
-                    .arg(it.value().join(", "));
-    }
+    for (auto it = nets.cbegin(); it != nets.cend(); ++it)
+        text += QString("Net %1 : %2\n").arg(it.key()).arg(it.value().join(", "));
     if (!floating.isEmpty())
         text += QString("\nNon connectées : %1").arg(floating.join(", "));
 
-    QMessageBox::information(this, "Netlist", text);
+    QMessageBox::information(this, "Netlist (folio courant)", text);
     schema_free(sc);
 }
 
-// ------------------------------------------------------------------
-//  Simulation : utilitaires
-// ------------------------------------------------------------------
-static QString ngspiceRoot()
+void SchemaView::verifyElectrical()
 {
-    const QString base = QCoreApplication::applicationDirPath();
-    QStringList roots = {base + "/ngspice"};
-#ifdef Q_OS_MACOS
-    roots.prepend(base + "/../Resources/ngspice");
-#endif
-    for (const QString &r : std::as_const(roots)) {
-#ifdef Q_OS_WIN
-        const QString exe = r + "/bin/ngspice_con.exe";
-#else
-        const QString exe = r + "/bin/ngspice";
-#endif
-        if (QFile::exists(exe))
-            return QDir::cleanPath(r);
-    }
-    return QString();
-}
+    struct Rec { QString kind, ref, bobine; };
+    QList<Rec> recs;
+    QStringList issues;
 
-static QString findNgspice()
-{
-    const QString root = ngspiceRoot();
-    if (!root.isEmpty()) {
-#ifdef Q_OS_WIN
-        return root + "/bin/ngspice_con.exe";
-#else
-        return root + "/bin/ngspice";
-#endif
-    }
-    return QStandardPaths::findExecutable("ngspice");   // secours (développement)
-}
+    forEachFolio([&](int f) {
+        QList<SymbolItem *> syms;
+        QList<WireItem *> all, wires;
+        collect(syms, all);
+        for (WireItem *w : std::as_const(all))
+            if (w->points().size() >= 2)
+                wires << w;
+        for (const SymbolItem *s : std::as_const(syms))
+            recs.append(Rec{s->kind(), s->ref.trimmed(), propOf(s, "Bobine")});
 
-struct SpiceRun {
-    QString out;     // contenu de out.txt (wrdata)
-    QString log;     // contenu de out.log
-    QString err;     // message d'erreur si échec
-};
+        Schema *sc = buildSchema(syms, wires);
 
-static SpiceRun runNgspice(const QString &net, int timeoutMs)
-{
-    SpiceRun r;
-    const QString exe = findNgspice();
-    if (exe.isEmpty()) {
-        r.err = "ngspice est introuvable.";
-        return r;
-    }
-    QTemporaryDir dir;
-    if (!dir.isValid()) {
-        r.err = "Impossible de créer un dossier temporaire.";
-        return r;
-    }
-    QFile cir(dir.filePath("circuit.cir"));
-    if (!cir.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        r.err = "Impossible d'écrire la netlist.";
-        return r;
-    }
-    cir.write(net.toUtf8());
-    cir.close();
+        QStringList floating;
+        for (int c = 0; c < syms.size(); ++c)
+            for (int i = 0; i < syms[c]->pinCount(); ++i)
+                if (syms[c]->pinActive(i) && schema_pin_net(sc, c, i) < 0)
+                    floating << QString("%1.%2").arg(syms[c]->ref).arg(i + 1);
+        if (!floating.isEmpty())
+            issues << QString("Folio %1 : broches non connectées : %2").arg(f + 1).arg(floating.join(", "));
 
-    QProcess proc;
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    const QString root = ngspiceRoot();
-    if (!root.isEmpty()) {
-        env.insert("SPICE_SCRIPTS", root + "/share/ngspice/scripts");
-#ifndef Q_OS_WIN
-        env.insert("SPICE_LIB_DIR", root + "/share/ngspice");
-#endif
-    }
-    proc.setProcessEnvironment(env);
-    proc.setWorkingDirectory(dir.path());
-    proc.start(exe, {"-b", "-o", "out.log", "circuit.cir"});
-    if (!proc.waitForFinished(timeoutMs)) {
-        if (proc.error() == QProcess::FailedToStart) {
-            r.err = "ngspice n'a pas pu démarrer (bloqué par Windows ou un antivirus ?).";
-        } else {
-            proc.kill();
-            proc.waitForFinished(1000);
-            r.err = "ngspice ne répond pas (délai dépassé).";
+        // un même net ne doit pas mélanger des natures de fils différentes
+        QMap<int, QSet<QString>> nat;
+        for (int w = 0; w < wires.size(); ++w) {
+            if (wires[w]->nature() == "OTHER")
+                continue;
+            const int net = schema_wire_net(sc, w);
+            if (net >= 0)
+                nat[net] << wires[w]->nature();
         }
-        return r;
+        for (auto it = nat.cbegin(); it != nat.cend(); ++it)
+            if (it.value().size() > 1) {
+                QStringList lab;
+                for (const QString &n : it.value())
+                    lab << wireNatureLabel(n);
+                lab.sort();
+                issues << QString("Folio %1 : un même net mélange %2.").arg(f + 1).arg(lab.join(" et "));
+            }
+        schema_free(sc);
+    });
+
+    // cohérence des repères dans tout le projet
+    static const QSet<QString> contactKinds = {"contact_no", "contact_nc", "contact_co",
+                                               "contact_td_no", "contact_td_nc", "thermal_nc"};
+    QSet<QString> coils, contactors, thermals, used;
+    for (const Rec &r : std::as_const(recs)) {
+        const QString key = r.ref.toLower();
+        if (r.kind == "coil" || r.kind == "relay" || r.kind == "timer_coil") {
+            if (coils.contains(key))
+                issues << QString("Bobine « %1 » en double.").arg(r.ref);
+            coils << key;
+        } else if (r.kind.startsWith("contactor")) {
+            contactors << key;
+        } else if (r.kind == "thermal3") {
+            thermals << key;
+        }
     }
-
-    QFile lg(dir.filePath("out.log"));
-    if (lg.open(QIODevice::ReadOnly | QIODevice::Text))
-        r.log = QString::fromUtf8(lg.readAll());
-    else
-        r.log = QString::fromUtf8(proc.readAllStandardOutput());
-    QFile out(dir.filePath("out.txt"));
-    if (out.open(QIODevice::ReadOnly | QIODevice::Text))
-        r.out = QString::fromUtf8(out.readAll());
-    return r;
-}
-
-// Lit un fichier wrdata : chaque vecteur occupe un groupe de colonnes dont la première
-// est l'abscisse et la dernière la valeur (2 ou 3 colonnes selon le type d'analyse).
-static bool parseColumns(const QString &text, int vectors, QVector<double> &x,
-                         QList<QVector<double>> &ys)
-{
-    static const QRegularExpression ws("\\s+");
-    x.clear();
-    ys.clear();
-    for (int k = 0; k < vectors; ++k)
-        ys << QVector<double>();
-
-    const QStringList lines = text.split('\n');
-    for (const QString &line : lines) {
-        const QStringList c = line.trimmed().split(ws, Qt::SkipEmptyParts);
-        if (vectors <= 0 || c.size() < 2 * vectors || c.size() % vectors != 0)
+    for (const Rec &r : std::as_const(recs)) {
+        if (!contactKinds.contains(r.kind))
             continue;
-        const int stride = int(c.size()) / vectors;
-        bool ok = true;
-        const double xv = c[0].toDouble(&ok);
-        if (!ok) continue;
-        QVector<double> vals;
-        for (int k = 0; k < vectors && ok; ++k)
-            vals << c[k * stride + stride - 1].toDouble(&ok);
-        if (!ok) continue;
-        x << xv;
-        for (int k = 0; k < vectors; ++k)
-            ys[k] << vals[k];
-    }
-    return x.size() >= 2;
-}
-
-static const QRegularExpression &posNumber()
-{
-    static const QRegularExpression re(
-        "^[0-9]+(\\.[0-9]+)?(e[-+]?[0-9]+)?(f|p|n|u|m|k|meg|g|t)?$",
-        QRegularExpression::CaseInsensitiveOption);
-    return re;
-}
-
-static const QRegularExpression &signedNumber()
-{
-    static const QRegularExpression re(
-        "^-?[0-9]+(\\.[0-9]+)?(e[-+]?[0-9]+)?(f|p|n|u|m|k|meg|g|t)?$",
-        QRegularExpression::CaseInsensitiveOption);
-    return re;
-}
-
-static void showPlots(QWidget *parent, const QString &title, const QList<PlotWidget *> &plots)
-{
-    QDialog dlg(parent);
-    dlg.setWindowTitle(title);
-    auto *lay = new QVBoxLayout(&dlg);
-    for (PlotWidget *pl : plots)
-        lay->addWidget(pl);
-    dlg.resize(820, plots.size() > 1 ? 720 : 520);
-    dlg.exec();
-}
-
-static QListWidget *addNodeList(QFormLayout *form, const SpiceResult &r)
-{
-    auto *lw = new QListWidget;
-    lw->setMaximumHeight(140);
-    for (const QString &n : r.nodes) {
-        const QString d = r.nodeDesc.value(n);
-        auto *it = new QListWidgetItem(d.isEmpty() ? n : QString("%1   (%2)").arg(n, d), lw);
-        it->setData(Qt::UserRole, n);
-        it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
-        it->setCheckState(Qt::Checked);
-    }
-    form->addRow("Courbes à tracer :", lw);
-    return lw;
-}
-
-static QStringList checkedNodes(const QListWidget *lw)
-{
-    QStringList out;
-    for (int i = 0; i < lw->count(); ++i)
-        if (lw->item(i)->checkState() == Qt::Checked)
-            out << lw->item(i)->data(Qt::UserRole).toString();
-    return out;
-}
-// ------------------------------------------------------------------
-//  Simulations
-// ------------------------------------------------------------------
-void SchemaView::simulateDC()
-{
-    QList<SymbolItem *> syms;
-    QList<WireItem *> wires;
-    collect(syms, wires);
-
-    const SpiceResult r = buildNetlist(syms, wires);
-    if (!r.error.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", r.error);
-        return;
-    }
-
-    const SpiceRun run = runNgspice(r.netlist, 15000);
-    if (!run.err.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", run.err);
-        return;
-    }
-
-    const QString text = "=== Nœuds ===\n" + r.legend + "\n=== Netlist ===\n" + r.netlist
-                         + "\n=== Résultat ngspice ===\n" + run.log;
-
-    QDialog dlg(this);
-    dlg.setWindowTitle("Simulation : point de fonctionnement DC");
-    dlg.resize(700, 600);
-    auto *lay = new QVBoxLayout(&dlg);
-    auto *edit = new QPlainTextEdit(text);
-    edit->setReadOnly(true);
-    edit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    lay->addWidget(edit);
-    dlg.exec();
-}
-
-void SchemaView::simulateTran()
-{
-    QList<SymbolItem *> syms;
-    QList<WireItem *> wires;
-    collect(syms, wires);
-
-    const SpiceResult r = buildNetlist(syms, wires);
-    if (!r.error.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", r.error);
-        return;
-    }
-    if (r.nodes.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", "Aucun nœud à tracer.");
-        return;
-    }
-
-    QDialog pd(this);
-    pd.setWindowTitle("Simulation transitoire");
-    auto *form = new QFormLayout(&pd);
-    auto *eStop = new QLineEdit("500u");
-    auto *eStep = new QLineEdit("1u");
-    form->addRow("Durée (ex. 5m, 500u) :", eStop);
-    form->addRow("Pas (ex. 1u) :", eStep);
-    QListWidget *list = addNodeList(form, r);
-    auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    form->addRow(bb);
-    connect(bb, &QDialogButtonBox::accepted, &pd, &QDialog::accept);
-    connect(bb, &QDialogButtonBox::rejected, &pd, &QDialog::reject);
-    if (pd.exec() != QDialog::Accepted)
-        return;
-
-    const QStringList sel = checkedNodes(list);
-    if (sel.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", "Cochez au moins une courbe.");
-        return;
-    }
-    const QString stop = eStop->text().trimmed();
-    const QString step = eStep->text().trimmed();
-    if (!posNumber().match(stop).hasMatch() || !posNumber().match(step).hasMatch()) {
-        QMessageBox::warning(this, "Simulation", "Valeur invalide. Exemples : 5m, 500u, 1u, 0.001");
-        return;
-    }
-
-    const QString vecs = "v(" + sel.join(") v(") + ")";
-    const QString net = r.body
-                        + QString(".control\ntran %1 %2 uic\nwrdata out.txt %3\n.endc\n.end\n")
-                              .arg(step, stop, vecs);
-
-    const SpiceRun run = runNgspice(net, 30000);
-    if (!run.err.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", run.err);
-        return;
-    }
-
-    QVector<double> t;
-    QList<QVector<double>> series;
-    if (!parseColumns(run.out, int(sel.size()), t, series)) {
-        QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
-        return;
-    }
-
-    QStringList names;
-    for (const QString &n : sel)
-        names << "V(" + n + ")";
-    auto *plot = new PlotWidget;
-    plot->setAxes("s", "V");
-    plot->setData(t, series, names);
-    showPlots(this, "Simulation transitoire", {plot});
-}
-
-void SchemaView::simulateSweep()
-{
-    QList<SymbolItem *> syms;
-    QList<WireItem *> wires;
-    collect(syms, wires);
-
-    const SpiceResult r = buildNetlist(syms, wires);
-    if (!r.error.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", r.error);
-        return;
-    }
-    if (r.dcNames.isEmpty()) {
-        QMessageBox::warning(this, "Simulation",
-                             "Le balayage DC a besoin d'une source de tension DC dans le schéma.");
-        return;
-    }
-    if (r.nodes.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", "Aucun nœud à tracer.");
-        return;
-    }
-
-    QDialog pd(this);
-    pd.setWindowTitle("Balayage DC");
-    auto *form = new QFormLayout(&pd);
-    auto *cb = new QComboBox;
-    cb->addItems(r.dcRefs);
-    auto *eStart = new QLineEdit("0");
-    auto *eStop = new QLineEdit("5");
-    auto *eStep = new QLineEdit("0.1");
-    form->addRow("Source à faire varier :", cb);
-    form->addRow("Début (V) :", eStart);
-    form->addRow("Fin (V) :", eStop);
-    form->addRow("Pas (V) :", eStep);
-    QListWidget *list = addNodeList(form, r);
-    auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    form->addRow(bb);
-    connect(bb, &QDialogButtonBox::accepted, &pd, &QDialog::accept);
-    connect(bb, &QDialogButtonBox::rejected, &pd, &QDialog::reject);
-    if (pd.exec() != QDialog::Accepted)
-        return;
-
-    const QStringList sel = checkedNodes(list);
-    if (sel.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", "Cochez au moins une courbe.");
-        return;
-    }
-    const QString a = eStart->text().trimmed(), b = eStop->text().trimmed(),
-        c = eStep->text().trimmed();
-    if (!signedNumber().match(a).hasMatch() || !signedNumber().match(b).hasMatch()
-        || !posNumber().match(c).hasMatch()) {
-        QMessageBox::warning(this, "Simulation",
-                             "Valeur invalide. Exemples : 0, 5, -2, 0.1 (le pas doit être positif).");
-        return;
-    }
-
-    const QString vecs = "v(" + sel.join(") v(") + ")";
-    const QString net = r.body
-                        + QString(".control\ndc %1 %2 %3 %4\nwrdata out.txt %5\n.endc\n.end\n")
-                              .arg(r.dcNames[cb->currentIndex()], a, b, c, vecs);
-
-    const SpiceRun run = runNgspice(net, 30000);
-    if (!run.err.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", run.err);
-        return;
-    }
-
-    QVector<double> x;
-    QList<QVector<double>> series;
-    if (!parseColumns(run.out, int(sel.size()), x, series)) {
-        QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
-        return;
-    }
-
-    QStringList names;
-    for (const QString &n : sel)
-        names << "V(" + n + ")";
-    auto *plot = new PlotWidget;
-    plot->setAxes("V", "V");
-    plot->setData(x, series, names);
-    showPlots(this, "Balayage DC : " + cb->currentText(), {plot});
-}
-
-void SchemaView::simulateAC()
-{
-    QList<SymbolItem *> syms;
-    QList<WireItem *> wires;
-    collect(syms, wires);
-
-    const SpiceResult r = buildNetlist(syms, wires, true);
-    if (!r.error.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", r.error);
-        return;
-    }
-    if (!r.hasAc) {
-        QMessageBox::warning(this, "Simulation",
-                             "L'analyse AC a besoin d'une source sinusoïdale : c'est l'entrée du "
-                             "circuit (1 V en AC).");
-        return;
-    }
-    if (r.nodes.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", "Aucun nœud à tracer.");
-        return;
-    }
-
-    QDialog pd(this);
-    pd.setWindowTitle("Analyse AC (Bode)");
-    auto *form = new QFormLayout(&pd);
-    auto *eStart = new QLineEdit("10");
-    auto *eStop = new QLineEdit("100k");
-    auto *ePts = new QLineEdit("20");
-    form->addRow("Fréquence de début (Hz) :", eStart);
-    form->addRow("Fréquence de fin (Hz) :", eStop);
-    form->addRow("Points par décade :", ePts);
-    QListWidget *list = addNodeList(form, r);
-    auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    form->addRow(bb);
-    connect(bb, &QDialogButtonBox::accepted, &pd, &QDialog::accept);
-    connect(bb, &QDialogButtonBox::rejected, &pd, &QDialog::reject);
-    if (pd.exec() != QDialog::Accepted)
-        return;
-
-    const QStringList sel = checkedNodes(list);
-    if (sel.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", "Cochez au moins une courbe.");
-        return;
-    }
-    const QString f1 = eStart->text().trimmed(), f2 = eStop->text().trimmed(),
-        np = ePts->text().trimmed();
-    static const QRegularExpression integer("^[0-9]{1,4}$");
-    if (!posNumber().match(f1).hasMatch() || !posNumber().match(f2).hasMatch()
-        || !integer.match(np).hasMatch() || f1 == "0") {
-        QMessageBox::warning(this, "Simulation",
-                             "Valeur invalide. Exemples : 10, 100k, 1meg ; points par décade : 20.");
-        return;
-    }
-
-    QStringList vecs;
-    for (const QString &n : sel)
-        vecs << QString("db(v(%1)) phase(v(%1))").arg(n);
-    const QString net = r.body
-                        + QString(".control\nac dec %1 %2 %3\nwrdata out.txt %4\n.endc\n.end\n")
-                              .arg(np, f1, f2, vecs.join(' '));
-
-    const SpiceRun run = runNgspice(net, 30000);
-    if (!run.err.isEmpty()) {
-        QMessageBox::warning(this, "Simulation", run.err);
-        return;
-    }
-
-    QVector<double> f;
-    QList<QVector<double>> raw;
-    const int nodes = int(sel.size());
-    if (!parseColumns(run.out, 2 * nodes, f, raw)) {
-        QMessageBox::warning(this, "Simulation", "Aucun résultat.\n\n" + run.log.right(800));
-        return;
-    }
-
-    QList<QVector<double>> gain, phase;
-    QStringList names;
-    for (int k = 0; k < nodes; ++k) {
-        gain << raw[2 * k];
-        QVector<double> ph = raw[2 * k + 1];
-        for (double &v : ph)
-            v = v * 180.0 / M_PI;                 // radians -> degrés
-        for (int i = 1; i < ph.size(); ++i) {     // déroulement de la phase
-            while (ph[i] - ph[i - 1] > 180.0) ph[i] -= 360.0;
-            while (ph[i] - ph[i - 1] < -180.0) ph[i] += 360.0;
+        const QString key = r.bobine.toLower();
+        if (key.isEmpty()) {
+            issues << QString("Contact sans bobine associée (%1).").arg(r.ref);
+            continue;
         }
-        phase << ph;
-        names << "V(" + sel[k] + ")";
+        const bool ok = (r.kind == "thermal_nc") ? thermals.contains(key) : coils.contains(key);
+        if (!ok)
+            issues << QString("Contact « %1 » : aucun repère « %2 » dans le projet.")
+                          .arg(r.ref, r.bobine);
+        used << key;
+    }
+    for (const Rec &r : std::as_const(recs)) {
+        const QString key = r.ref.toLower();
+        if ((r.kind == "coil" || r.kind == "relay" || r.kind == "timer_coil")
+            && !used.contains(key) && !contactors.contains(key))
+            issues << QString("Bobine « %1 » : aucun contact ni pôle de puissance associé.").arg(r.ref);
+        if (r.kind == "thermal3" && !used.contains(key))
+            issues << QString("Relais thermique « %1 » : aucun contact thermique associé.").arg(r.ref);
     }
 
-    auto *pg = new PlotWidget;
-    pg->setAxes("Hz", "dB", true, false);
-    pg->setData(f, gain, names);
-    auto *pp = new PlotWidget;
-    pp->setAxes("Hz", "°", true, false);
-    pp->setData(f, phase, names);
-    showPlots(this, "Analyse AC : gain (dB) et phase (°)", {pg, pp});
+    QMessageBox::information(this, "Vérification du projet",
+                             issues.isEmpty() ? QString("Aucun problème détecté.")
+                                              : issues.join("\n"));
 }

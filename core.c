@@ -2,11 +2,11 @@
 #include <stdlib.h>
 
 typedef struct { int x, y; int comp, pin; int wire; } Node;   /* comp = -1 : bout de fil */
-typedef struct { int x1, y1, x2, y2; int wire; int rep; } Seg; /* rep = nœud représentant le fil */
+typedef struct { int x1, y1, x2, y2; int wire; int rep; } Seg;
 
 struct Schema {
     Node *nodes;  int count, cap;
-    int  *links;  int link_count, link_cap;      /* paires de nœuds (fils) */
+    int  *links;  int link_count, link_cap;      /* paires de nœuds */
     Seg  *segs;   int seg_count, seg_cap;
     int   wire_count;
     int  *parent;
@@ -55,6 +55,19 @@ static int add_seg(Schema *s, int x1, int y1, int x2, int y2, int wire, int rep)
     return 1;
 }
 
+static int push_link(Schema *s, int a, int b)
+{
+    if (s->link_count + 2 > s->link_cap) {
+        int ncap = s->link_cap ? s->link_cap * 2 : 64;
+        int *p = (int *)realloc(s->links, (size_t)ncap * sizeof(int));
+        if (!p) return 0;
+        s->links = p; s->link_cap = ncap;
+    }
+    s->links[s->link_count++] = a;
+    s->links[s->link_count++] = b;
+    return 1;
+}
+
 void schema_add_pin(Schema *s, int comp, int pin, int x, int y)
 {
     add_node(s, x, y, comp, pin, -1);
@@ -68,25 +81,32 @@ void schema_add_wire(Schema *s, const int *xy, int npts)
     a = add_node(s, xy[0], xy[1], -1, -1, wid);
     b = add_node(s, xy[2 * (npts - 1)], xy[2 * (npts - 1) + 1], -1, -1, wid);
     if (a < 0 || b < 0) return;
-
-    if (s->link_count + 2 > s->link_cap) {
-        int ncap = s->link_cap ? s->link_cap * 2 : 64;
-        int *p = (int *)realloc(s->links, (size_t)ncap * sizeof(int));
-        if (!p) return;
-        s->links = p; s->link_cap = ncap;
-    }
-    s->links[s->link_count++] = a;
-    s->links[s->link_count++] = b;
-
+    if (!push_link(s, a, b)) return;
     for (k = 0; k + 1 < npts; k++)
         add_seg(s, xy[2 * k], xy[2 * k + 1], xy[2 * k + 2], xy[2 * k + 3], wid, a);
+}
+
+static int find_pin(const Schema *s, int comp, int pin)
+{
+    int i;
+    for (i = 0; i < s->count; i++)
+        if (s->nodes[i].comp == comp && s->nodes[i].pin == pin)
+            return i;
+    return -1;
+}
+
+void schema_connect_pins(Schema *s, int comp, int pin_a, int pin_b)
+{
+    int a = find_pin(s, comp, pin_a), b = find_pin(s, comp, pin_b);
+    if (a < 0 || b < 0) return;
+    push_link(s, a, b);
 }
 
 /* ---- union-find ---- */
 static int find(int *parent, int i)
 {
     while (parent[i] != i) {
-        parent[i] = parent[parent[i]];   /* compression de chemin */
+        parent[i] = parent[parent[i]];
         i = parent[i];
     }
     return i;
@@ -101,7 +121,6 @@ static void unite(int *parent, int a, int b)
 static int imin(int a, int b) { return a < b ? a : b; }
 static int imax(int a, int b) { return a > b ? a : b; }
 
-/* le point (px,py) est-il sur le segment ? */
 static int on_seg(const Seg *g, int px, int py)
 {
     long long cross = (long long)(g->x2 - g->x1) * (py - g->y1)
@@ -129,25 +148,24 @@ int schema_compute_nets(Schema *s)
 
     for (i = 0; i < n; i++) { s->parent[i] = i; label[i] = -1; }
 
-    /* 1. les deux bouts d'un fil sont au même potentiel */
+    /* 1. bouts d'un fil, liaisons internes */
     for (i = 0; i + 1 < s->link_count; i += 2)
         unite(s->parent, s->links[i], s->links[i + 1]);
 
-    /* 2. deux points au même endroit sont au même potentiel */
+    /* 2. deux points au même endroit */
     for (i = 0; i < n; i++)
         for (j = i + 1; j < n; j++)
             if (s->nodes[i].x == s->nodes[j].x && s->nodes[i].y == s->nodes[j].y)
                 unite(s->parent, i, j);
 
-    /* 3. jonctions en T : un point posé sur un autre fil est relié à ce fil.
-          Deux fils qui se croisent sans extrémité commune ne sont PAS reliés. */
+    /* 3. jonctions en T */
     for (i = 0; i < n; i++)
         for (k = 0; k < s->seg_count; k++)
             if (s->nodes[i].wire != s->segs[k].wire
                 && on_seg(&s->segs[k], s->nodes[i].x, s->nodes[i].y))
                 unite(s->parent, i, s->segs[k].rep);
 
-    /* 4. numérotation des nets (un groupe d'un seul point = non connecté) */
+    /* 4. numérotation des nets */
     for (i = 0; i < n; i++) size[find(s->parent, i)]++;
     for (i = 0; i < n; i++) {
         int r = find(s->parent, i);
@@ -168,6 +186,16 @@ int schema_pin_net(const Schema *s, int comp, int pin)
     if (!s->net) return -2;
     for (i = 0; i < s->count; i++)
         if (s->nodes[i].comp == comp && s->nodes[i].pin == pin)
+            return s->net[i];
+    return -2;
+}
+
+int schema_wire_net(const Schema *s, int wire)
+{
+    int i;
+    if (!s->net) return -2;
+    for (i = 0; i < s->count; i++)
+        if (s->nodes[i].comp == -1 && s->nodes[i].wire == wire)
             return s->net[i];
     return -2;
 }

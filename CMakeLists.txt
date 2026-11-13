@@ -28,6 +28,20 @@ qt_add_executable(Voltix
     catalog.h
     librarypanel.h
     welcomepage.h
+    schemaview_sim.cpp
+    electro2.cpp
+    schemaview_sim.cpp
+    project.h
+    sheet.h
+    wiredialog.h
+    projectdialog.h
+    project.h
+    sheet.h
+    wiredialog.h
+    projectdialog.h
+    electro2.cpp
+    bench.h
+    bench.cpp
 )
 
 # images facultatives des cartes d'accueil : resources/electronique.jpg, etc.

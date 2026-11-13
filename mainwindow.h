@@ -16,6 +16,8 @@ class WelcomePage;
 class LibraryPanel;
 class QStackedWidget;
 class QDockWidget;
+class QTabBar;
+class QToolBar;
 class QAction;
 class QCloseEvent;
 
@@ -38,15 +40,24 @@ private:
     WelcomePage *m_welcome = nullptr;
     LibraryPanel *m_lib = nullptr;
     QStackedWidget *m_stack = nullptr;
+    QWidget *m_editor = nullptr;
+    QTabBar *m_tabs = nullptr;
+    QToolBar *m_wireBar = nullptr;
     QDockWidget *m_dock = nullptr;
     QString m_path;
     int m_module = 1;
+    bool m_fitted = false;
     QAction *m_undoAct = nullptr;
     QAction *m_redoAct = nullptr;
     QList<QAction *> m_modActs;
+    QMenu *m_folioMenu = nullptr;
 
     void enterModule(int module);
     void showWelcome();
+    void rebuildTabs();
+    void renameFolio(int i);
+    void editProject();
+    void exportPdf();
     void updateState();
     bool maybeSave();
     void newFile();

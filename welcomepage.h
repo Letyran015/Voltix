@@ -87,13 +87,13 @@ protected:
         const qreal W = width(), H = height();
 
         QLinearGradient bg(0, 0, 0, H);
-        bg.setColorAt(0, QColor(24, 120, 235));
-        bg.setColorAt(1, QColor(10, 50, 160));
+        bg.setColorAt(0, QColor(150, 154, 160));      // gris clair en haut
+        bg.setColorAt(1, QColor(52, 56, 62));         // gris foncé en bas
         p.fillRect(rect(), bg);
 
         // éclats décoratifs
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(80, 170, 255, 90));
+        p.setBrush(QColor(210, 214, 220, 90));
         p.drawPolygon(QPolygonF({QPointF(0, H * 0.22), QPointF(W * 0.05, H * 0.245), QPointF(0, H * 0.26)}));
         p.drawPolygon(QPolygonF({QPointF(W, H * 0.10), QPointF(W * 0.93, H * 0.17), QPointF(W, H * 0.13)}));
         p.drawPolygon(QPolygonF({QPointF(0, H), QPointF(W * 0.08, H * 0.84), QPointF(W * 0.10, H)}));
@@ -251,7 +251,7 @@ private:
         p.restore();
 
         p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(act ? QColor(Qt::white) : QColor(0, 170, 255), act ? 4 : 3));
+        p.setPen(QPen(act ? QColor(Qt::white) : QColor(190, 195, 202), act ? 4 : 3));
         p.drawRoundedRect(r, 4, 4);
 
         if (in.beta) {                               // étiquette BÊTA
