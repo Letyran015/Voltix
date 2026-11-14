@@ -37,8 +37,3 @@ désactivée dans les réglages.
 
 *Voltix does not collect, store or transmit any personal data. The only network access is the update check, which
 queries the public GitHub API and, with your consent, downloads the installer from GitHub.*
-
-## Signature du code
-
-*Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).*
-(À conserver dans cette page uniquement si la demande de signature est acceptée.)
