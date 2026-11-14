@@ -22,6 +22,8 @@
 #include <QPainter>
 #include <QPolygonF>
 #include <QStringList>
+#include <QStyleOptionGraphicsItem>
+#include <QTransform>
 #include <QVector>
 
 inline const LibSpec *libFind(const QString &id)
@@ -115,18 +117,70 @@ public:
     int pinCount() const override { return m_pins.size(); }
     QPointF pinLocal(int i) const override { return m_pins.value(i); }
 
+    QString role() const { return m_role; }
+    QString folder() const { return QString::fromUtf8(m_s.group); }
+    bool isSlave() const { return m_role == "contact" || m_role == "thcontact" || m_role == "power"; }
+    bool isMaster() const { return m_role == "coil" || m_role == "thermal"; }
+    QRectF body() const { return m_rect; }
+
+    // Champs affichés près du symbole : Nom, Valeur, Champ 3, Champ 4 (ceux dont « Vis. » est coché).
+    // Symbole esclave (contact, pôles) : le nom est celui du maître, la valeur est sa référence croisée.
     QStringList labelLines() const override
     {
         QStringList lines;
+        if (isSlave()) {
+            for (const Prop &pr : props) {
+                if (!pr.show)
+                    continue;
+                if (pr.name == "Bobine" && !pr.value.trimmed().isEmpty())
+                    lines << pr.value.trimmed();
+                else if (pr.name == "Valeur" && !(xref.isEmpty() ? pr.value.trimmed() : xref).isEmpty())
+                    lines << (xref.isEmpty() ? pr.value.trimmed() : xref);
+                else if ((pr.name == "Champ 3" || pr.name == "Champ 4") && !pr.value.trimmed().isEmpty())
+                    lines << pr.value.trimmed();
+            }
+            return lines;
+        }
         if (showRef && !ref.isEmpty())
             lines << ref;
-        for (const Prop &pr : props) {
-            if (!pr.show || pr.value.trimmed().isEmpty())
-                continue;
-            if (pr.name == "Bobine") lines << pr.value;          // repère de l'appareil associé
-            else lines << QString("%1 %2").arg(pr.value, pr.unit).trimmed();
-        }
+        for (const Prop &pr : props)
+            if (pr.show && !pr.value.trimmed().isEmpty()
+                && (pr.name == "Valeur" || pr.name == "Champ 3" || pr.name == "Champ 4"))
+                lines << pr.value.trimmed();
         return lines;
+    }
+
+    void paint(QPainter *p, const QStyleOptionGraphicsItem *o, QWidget *w) override
+    {
+        SymbolItem::paint(p, o, w);
+        if (!isMaster() || (xrefNo.isEmpty() && xrefNc.isEmpty()))
+            return;
+
+        // Maître : tableau des références croisées « NO | NC » sous le symbole
+        QTransform t;
+        t.rotate(rotation());
+        const QRectF rb = t.mapRect(bodyRect());
+        qreal top = rb.bottom() + 4;
+        if (rb.height() <= rb.width())
+            top += 15.0 * labelLines().size();          // le texte est déjà sous le symbole
+        const int rows = qMax(xrefNo.size(), xrefNc.size());
+        const qreal rh = 12, half = 62;
+
+        p->save();
+        p->rotate(-rotation());
+        QFont f = p->font();
+        f.setPixelSize(10);
+        p->setFont(f);
+        p->setPen(QPen(isSelected() ? QColor(0, 120, 215) : QColor(Qt::black), 1));
+        p->drawText(QRectF(-half, top, half - 5, rh), Qt::AlignRight | Qt::AlignVCenter, "NO");
+        p->drawText(QRectF(5, top, half - 5, rh), Qt::AlignLeft | Qt::AlignVCenter, "NC");
+        p->drawLine(QPointF(-half, top + rh), QPointF(half, top + rh));
+        p->drawLine(QPointF(0, top), QPointF(0, top + rh * (rows + 1) + 2));
+        for (int i = 0; i < xrefNo.size(); ++i)
+            p->drawText(QRectF(-half - 30, top + rh * (i + 1) + 1, half + 25, rh), Qt::AlignRight | Qt::AlignVCenter, xrefNo[i]);
+        for (int i = 0; i < xrefNc.size(); ++i)
+            p->drawText(QRectF(5, top + rh * (i + 1) + 1, half + 25, rh), Qt::AlignLeft | Qt::AlignVCenter, xrefNc[i]);
+        p->restore();
     }
 
 protected:
@@ -235,6 +289,8 @@ private:
         const QString t = subst(op.s);
         if (t.isEmpty())
             return;
+        if ((op.t == "TL" || op.t == "TR") && prop("Numéros") == "0")
+            return;                                   // numéros de broches masqués
         const int px = qMax(4, int(op.v.value(2)));
         p->save();
         p->translate(op.v.value(0), op.v.value(1));

@@ -34,6 +34,10 @@ public:
     bool showRef = true;
     QList<Prop> props;
 
+    // Références croisées (calculées par SchemaView, jamais enregistrées)
+    QString xref;                  // esclave : emplacement du maître, « ( 02 - J ) »
+    QStringList xrefNo, xrefNc;    // maître : emplacements des contacts NO / NC
+
     virtual QString prefix() const = 0;
     virtual QString kind() const = 0;
     virtual QString title() const = 0;       // nom affiché dans la fenêtre de propriétés

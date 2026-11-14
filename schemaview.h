@@ -96,6 +96,7 @@ private:
     void storeCurrent();
     void loadFolio(int i);
     void forEachFolio(const std::function<void(int)> &fn);
+    void updateCrossRefs();                       // maître (bobine) <-> esclaves (contacts, pôles)
 
     bool m_panning = false;
     QPoint m_lastPos;

@@ -1,4 +1,5 @@
 #include "elib.h"
+#include "electrodialog.h"
 #include "schemaview.h"
 #include "symbolitem.h"
 #include "wireitem.h"
@@ -499,9 +500,76 @@ bool SchemaView::deserialize(const QByteArray &data, bool recenter)
         w->setEnds(sa, pa, sb, pb);
     }
 
+    updateCrossRefs();
     if (recenter)
         zoomFit();
     return true;
+}
+
+// Références croisées façon schéma d'armoire : chaque contact (esclave) affiche l'emplacement
+// « ( folio - colonne ) » de sa bobine (maître) ; la bobine affiche le tableau NO / NC de ses contacts.
+void SchemaView::updateCrossRefs()
+{
+    struct Rec { QString role, kind, ref, bobine; int folio; qreal x; };
+    QList<Rec> recs;
+    for (int f = 0; f < m_folios.size(); ++f) {
+        const QByteArray &st = (f == m_folio) ? m_currentState : m_folios[f].state;
+        const QJsonArray comps = QJsonDocument::fromJson(st).object()["components"].toArray();
+        for (const QJsonValue &v : comps) {
+            const QJsonObject o = v.toObject();
+            const QString kind = o["kind"].toString();
+            const QString role = electroRole(kind);
+            if (role.isEmpty())
+                continue;
+            QString bob;
+            for (const QJsonValue &pv : o["props"].toArray())
+                if (pv.toObject()["name"].toString() == "Bobine")
+                    bob = pv.toObject()["value"].toString().trimmed();
+            recs.append({role, kind, o["ref"].toString().trimmed(), bob, f, o["x"].toDouble()});
+        }
+    }
+    auto where = [this](const Rec &r) {
+        return QString("( %1 - %2 )").arg(r.folio + 1, 2, 10, QChar('0')).arg(SheetItem::columnOf(m_pi.paper, r.x));
+    };
+    auto isMaster = [](const QString &role) { return role == "coil" || role == "thermal"; };
+
+    QHash<QString, QString> masterAt;                       // repère -> emplacement du maître
+    QHash<QString, QStringList> no, nc;                     // repère du maître -> emplacements des esclaves
+    for (const Rec &r : std::as_const(recs))
+        if (isMaster(r.role) && !masterAt.contains(r.ref.toLower()))
+            masterAt.insert(r.ref.toLower(), where(r));
+    for (const Rec &r : std::as_const(recs)) {
+        if (isMaster(r.role))
+            continue;
+        const QString key = (r.bobine.isEmpty() ? r.ref : r.bobine).toLower();
+        const QString w = (r.role == "power" ? "P" : "") + where(r);
+        (r.kind.contains("_nc") ? nc : no)[key] << w;
+    }
+
+    const QList<QGraphicsItem *> items = scene()->items();
+    for (QGraphicsItem *it : items) {
+        auto *s = dynamic_cast<SymbolItem *>(it);
+        if (!s)
+            continue;
+        const QString role = electroRole(s->kind());
+        QString x;
+        QStringList a, b;
+        if (isMaster(role)) {
+            a = no.value(s->ref.trimmed().toLower());
+            b = nc.value(s->ref.trimmed().toLower());
+        } else if (!role.isEmpty()) {
+            QString key = propOf(s, "Bobine").trimmed();
+            if (key.isEmpty())
+                key = s->ref.trimmed();
+            x = masterAt.value(key.toLower());
+        }
+        if (s->xref != x || s->xrefNo != a || s->xrefNc != b) {
+            s->xref = x;
+            s->xrefNo = a;
+            s->xrefNc = b;
+            s->update();
+        }
+    }
 }
 
 void SchemaView::commit()
@@ -515,6 +583,7 @@ void SchemaView::commit()
     m_redo.clear();
     m_currentState = now;
     m_dirty = true;
+    updateCrossRefs();
     emit stateChanged();
 }
 
@@ -903,8 +972,13 @@ void SchemaView::mouseDoubleClickEvent(QMouseEvent *e)
     if (e->button() == Qt::LeftButton) {
         QGraphicsItem *hit = itemAt(pos);
         if (auto *s = dynamic_cast<SymbolItem *>(hit)) {
-            PropertiesDialog dlg(s, this);
-            dlg.exec();
+            if (auto *li = dynamic_cast<LibItem *>(s)) {     // symbole d'électrotechnique : Champs 1 à 4, Broche, Réf. croisée
+                ElectroPropertiesDialog dlg(li, this);
+                dlg.exec();
+            } else {
+                PropertiesDialog dlg(s, this);
+                dlg.exec();
+            }
             commit();
             return;
         }

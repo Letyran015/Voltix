@@ -3,9 +3,15 @@
 #include <QPainter>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSceneWheelEvent>
+#include <QGraphicsSceneHoverEvent>
+#include <QCursor>
+#include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QDialog>
 #include <QFormLayout>
+#include <QVBoxLayout>
+#include <QSet>
+#include <QHash>
 #include <QDoubleSpinBox>
 #include <QDialogButtonBox>
 #include <QToolBar>
@@ -27,7 +33,15 @@
 #include <algorithm>
 
 static const double PI2 = 6.283185307179586;
-static const double kTableW = 3300, kTableH = 1500;   // banc allonge : place pour les grosses charges et transformateurs
+// Banc vu de face : le pupitre (console + table + caisson des molettes) est au centre ;
+// de la place est laissee de chaque cote, au sol, pour les charges et les transformateurs.
+static const double kTableW = 3600, kTableH = 1380, kFloorY = 1300;
+static const QPointF kBenchPos(700, 500);                // coin haut gauche du module « Pupitre »
+static const QRectF kZoneTop(780, 20, 2040, 480);        // sur la tablette de la console : appareils de mesure
+static const QRectF kZoneLeft(20, 340, 660, 950);        // a gauche du banc : charges
+static const QRectF kZoneRight(2920, 340, 660, 950);     // a droite du banc : transformateurs
+static const QRectF kZoneUnder(1130, 890, 1640, 400);    // sous la table, entre le caisson et le pied
+static const QRectF kViewBench(640, 0, 2320, 1380);      // vue de depart : le pupitre et sa table
 
 // =====================================================================================
 //  Douille
@@ -189,26 +203,38 @@ QVariant BenchModule::itemChange(GraphicsItemChange c, const QVariant &v)
 
 void BenchModule::mouseDoubleClickEvent(QGraphicsSceneMouseEvent *)
 {
-    if (params.empty()) return;
+    const QString plate = plateHtml();
+    const bool form_ = !params.empty() && !plateOnly;
+    if (plate.isEmpty() && !form_) return;
     QDialog d;
-    d.setWindowTitle(title);
-    auto *form = new QFormLayout(&d);
-    std::vector<QDoubleSpinBox *> boxes;
-    for (const BenchParam &pr : params) {
-        auto *sb = new QDoubleSpinBox;
-        sb->setDecimals(pr.decimals);
-        sb->setRange(pr.min, pr.max);
-        sb->setSingleStep(pr.step);
-        sb->setValue(pr.value);
-        if (!pr.unit.isEmpty()) sb->setSuffix(" " + pr.unit);
-        form->addRow(pr.name, sb);
-        boxes.push_back(sb);
+    d.setWindowTitle(plate.isEmpty() ? title : QStringLiteral("Plaque signaletique - ") + title);
+    auto *lay = new QVBoxLayout(&d);
+    if (!plate.isEmpty()) {                             // plaque signaletique, couplages
+        auto *lab = new QLabel(plate);
+        lab->setTextFormat(Qt::RichText);
+        lab->setWordWrap(true);
+        lab->setStyleSheet(QStringLiteral("QLabel { background:#1c1c1e; color:#f2f2f2; padding:12px; border:2px solid #c8c8c8; }"));
+        lay->addWidget(lab);
     }
-    auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    form->addRow(bb);
+    auto *form = new QFormLayout;
+    lay->addLayout(form);
+    std::vector<QDoubleSpinBox *> boxes;
+    if (form_)
+        for (const BenchParam &pr : params) {
+            auto *sb = new QDoubleSpinBox;
+            sb->setDecimals(pr.decimals);
+            sb->setRange(pr.min, pr.max);
+            sb->setSingleStep(pr.step);
+            sb->setValue(pr.value);
+            if (!pr.unit.isEmpty()) sb->setSuffix(" " + pr.unit);
+            form->addRow(pr.name, sb);
+            boxes.push_back(sb);
+        }
+    auto *bb = new QDialogButtonBox(form_ ? QDialogButtonBox::Ok | QDialogButtonBox::Cancel : QDialogButtonBox::Close);
+    lay->addWidget(bb);
     QObject::connect(bb, &QDialogButtonBox::accepted, &d, &QDialog::accept);
     QObject::connect(bb, &QDialogButtonBox::rejected, &d, &QDialog::reject);
-    if (d.exec() != QDialog::Accepted) return;
+    if (d.exec() != QDialog::Accepted || !form_) return;
     for (size_t i = 0; i < params.size(); ++i) params[i].value = boxes[i]->value();
     update();
     if (changed) changed();
@@ -322,44 +348,526 @@ const QColor cRed(190, 30, 35), cBlack(35, 35, 38), cBlue(40, 90, 200), cPE(230,
 
 QString fmt(double x, int d = 2) { return QString::number(x, 'f', d); }
 
-// ---- Pupitre : sectionneur + arret d'urgence + sortie 400 V + N -------------------------
+// ---- Pupitre : console d'alimentation du banc, table et caisson des autotransformateurs -------------------
+// De gauche a droite, comme sur le banc reel : prises PC 230 V, sortie variable monophasee (0-250 V AC ou DC),
+// sectionneur, marche / arret general et arret d'urgence, sortie fixe TRI 400 V + N, sortie variable triphasee
+// (0-430 V AC ou 0-270 V DC), prises PC 230 V. Sous la table : grande molette = variable triphase,
+// petite molette = variable monophase.
 class Pupitre : public BenchModule {
 public:
-    Pupitre() : BenchModule(QStringLiteral("Pupitre d'alimentation"), 330, 140, QColor(200, 203, 208)) {
-        pe = addSocket("PE", cPE, 45, 100);
-        n  = addSocket("N", cBlue, 105, 100);
-        p1 = addSocket("PH1", cBrown, 165, 100);
-        p2 = addSocket("PH2", cBlack, 225, 100);
-        p3 = addSocket("PH3", QColor(140, 140, 145), 285, 100);
-        params = { {"Sectionneur (0 = ouvert, 1 = ferme)", "", 0, 1, 1, 1, 0},
-                   {"Arret d'urgence (1 = enfonce)", "", 0, 1, 0, 1, 0},
-                   {"Tension du reseau variable", "%", 0, 100, 100, 5, 0} };
-        wheelParam = 2;
+    enum { PSect, PAu, PTri, PMono, PGen, PFix, PVarM, PVarT, PSelM, PSelT };
+    enum Ctl { CNone, CSect, CAu, CGenOn, CGenOff, CFixOn, CFixOff, CVmOn, CVmOff, CVtOn, CVtOff, CSelM, CSelT, CDialT, CDialM };
+    static constexpr double OX = 60, CW = 2080, CH = 320;         // console : origine, largeur, hauteur
+
+    Pupitre() : BenchModule(QStringLiteral("Pupitre d'alimentation"), 2200, 812, QColor(203, 204, 206)) {
         instrument = true;
+        setZValue(0.5);                              // les autres modules passent toujours devant
+        setFlag(ItemIsMovable, false);               // le pupitre est fixe : c'est le meuble du banc
+        setAcceptHoverEvents(true);
+        const double y = 222;
+        // sortie fixe TRI 400 V + N (les 5 premieres douilles, dans l'ordre de l'ancien pupitre)
+        fPe = addSocket("PE", cPE, OX + 1047, y);  fN = addSocket("N", cBlue, OX + 1091, y);
+        for (int k = 0; k < 3; ++k) fP[k] = addSocket(QStringLiteral("PH%1").arg(k + 1), cRed, OX + 1135 + 44 * k, y);
+        // variable monophase : 0-250 V AC puis 0-250 V DC
+        mPe = addSocket("PE", cPE, OX + 256, y);  mN = addSocket("N", cBlue, OX + 300, y);  mP = addSocket("PH1", cRed, OX + 344, y);
+        mPlus = addSocket("+", cRed, OX + 635, y);  mMinus = addSocket("-", cBlue, OX + 685, y);
+        // variable triphase : 0-430 V AC puis 0-270 V DC
+        tPe = addSocket("PE", cPE, OX + 1287, y);  tN = addSocket("N", cBlue, OX + 1331, y);
+        for (int k = 0; k < 3; ++k) tP[k] = addSocket(QStringLiteral("PH%1").arg(k + 1), cRed, OX + 1375 + 44 * k, y);
+        tPlus = addSocket("+", cRed, OX + 1755, y);  tMinus = addSocket("-", cBlue, OX + 1805, y);
+
+        params = { {"Sectionneur general (1 = ferme)", "", 0, 1, 0, 1, 0},
+                   {"Arret d'urgence (1 = enfonce)", "", 0, 1, 0, 1, 0},
+                   {"Molette du variable triphase", "%", 0, 100, 0, 1, 0},
+                   {"Molette du variable monophase", "%", 0, 100, 0, 1, 0},
+                   {"General en marche", "", 0, 1, 0, 1, 0},
+                   {"TRI 400 V + N en marche", "", 0, 1, 0, 1, 0},
+                   {"Variable monophase en marche", "", 0, 1, 0, 1, 0},
+                   {"Variable triphase en marche", "", 0, 1, 0, 1, 0},
+                   {"Selecteur du variable monophase (0 = AC, 1 = DC)", "", 0, 1, 0, 1, 0},
+                   {"Selecteur du variable triphase (0 = AC, 1 = DC)", "", 0, 1, 0, 1, 0} };
+
+        auto zone = [this](Ctl c, double cx, double cy, double r, const QString &tip) {
+            zones.push_back({c, QRectF(OX + cx - r, cy - r, 2 * r, 2 * r), tip});
+        };
+        zone(CSect, 832, 192, 44, QStringLiteral("Sectionneur general : cliquer pour le fermer ou l'ouvrir. C'est la premiere manoeuvre de mise en service."));
+        zone(CAu, 960, 234, 38, QStringLiteral("Arret d'urgence a cle : cliquer pour l'enfoncer (tout s'arrete), cliquer de nouveau pour le deverrouiller."));
+        zone(CGenOn, 925, 108, 20, QStringLiteral("MARCHE general : met le pupitre sous tension (sectionneur ferme, arret d'urgence relache)."));
+        zone(CGenOff, 995, 108, 20, QStringLiteral("ARRET general : coupe toutes les sorties."));
+        zone(CFixOn, 1075, 108, 20, QStringLiteral("MARCHE (cle) de la sortie fixe TRI 400 V + N."));
+        zone(CFixOff, 1195, 108, 20, QStringLiteral("ARRET de la sortie fixe TRI 400 V + N."));
+        zone(CVmOn, 440, 108, 20, QStringLiteral("MARCHE du variable monophase (reglage : petite molette sous la table)."));
+        zone(CVmOff, 510, 108, 20, QStringLiteral("ARRET du variable monophase."));
+        zone(CSelM, 475, 222, 20, QStringLiteral("Commutateur AC / DC du variable monophase : sortie 0-250 V AC (PH1 - N) ou 0-250 V DC (+ / -)."));
+        zone(CVtOn, 1520, 108, 20, QStringLiteral("MARCHE (cle) du variable triphase (reglage : grande molette sous la table)."));
+        zone(CVtOff, 1640, 108, 20, QStringLiteral("ARRET du variable triphase."));
+        zone(CSelT, 1580, 222, 20, QStringLiteral("Commutateur AC / DC du variable triphase : sortie 0-430 V AC ou 0-270 V DC (+ / -)."));
     }
+
+    // ---------------------------------------------------------------- etat
+    bool on(int i) const { return params[i].value > 0.5; }
+    void set(int i, bool v) { params[i].value = v ? 1 : 0; }
+    bool powered() const { return on(PSect) && !on(PAu); }
+    void normalize() {                               // un arret en amont fait tomber tout ce qui est en aval
+        if (!powered()) set(PGen, false);
+        if (!on(PGen)) { set(PFix, false); set(PVarM, false); set(PVarT, false); }
+    }
+    double kT() const { return params[PTri].value / 100.0; }
+    double kM() const { return params[PMono].value / 100.0; }
+
     bool isSupply() const override { return true; }
-    bool live() const { return params[0].value > 0.5 && params[1].value < 0.5; }
-    double vph() const { return 230.0 * params[2].value / 100.0; }
+    bool hasLinks() const override { return true; }
+    void links(std::vector<std::pair<BenchSocket *, BenchSocket *>> &l) override {
+        l.push_back({fN, mN}); l.push_back({fN, tN});            // neutre commun
+        l.push_back({fPe, mPe}); l.push_back({fPe, tPe});        // terre commune
+    }
     void sources(std::vector<BenchSrc> &s) override {
-        if (!live()) return;
-        double v = vph();
-        s.push_back({p1, n, std::polar(v, 0.0)});
-        s.push_back({p2, n, std::polar(v, -PI2 / 3)});
-        s.push_back({p3, n, std::polar(v, -2 * PI2 / 3)});
+        normalize();
+        const double a3 = PI2 / 3;
+        if (on(PFix))
+            for (int k = 0; k < 3; ++k) s.push_back({fP[k], fN, std::polar(230.0, -a3 * k)});
+        if (on(PVarT)) {
+            if (!on(PSelT)) for (int k = 0; k < 3; ++k) s.push_back({tP[k], tN, std::polar(430.0 / std::sqrt(3.0) * kT(), -a3 * k)});
+            else s.push_back({tPlus, tMinus, bcplx(0, 0), 270.0 * kT()});
+        }
+        if (on(PVarM)) {
+            if (!on(PSelM)) s.push_back({mP, mN, std::polar(250.0 * kM(), 0.0)});
+            else s.push_back({mPlus, mMinus, bcplx(0, 0), 250.0 * kM()});
+        }
     }
-    void paintExtra(QPainter *p) override {
+    void post(const BenchSolution &sol) override {
+        vMac = std::abs(sol.at(mP) - sol.at(mN));          iMac = std::abs(sol.iinAt(mP));
+        vMdc = std::abs(sol.dcAt(mPlus) - sol.dcAt(mMinus)); iMdc = std::abs(sol.iinDcAt(mPlus));
+        vTac = std::abs(sol.at(tP[0]) - sol.at(tP[1]));
+        iTac = std::max({std::abs(sol.iinAt(tP[0])), std::abs(sol.iinAt(tP[1])), std::abs(sol.iinAt(tP[2]))});
+        vTdc = std::abs(sol.dcAt(tPlus) - sol.dcAt(tMinus)); iTdc = std::abs(sol.iinDcAt(tPlus));
+        QStringList w;
+        if (iMac > 5.05) w << QStringLiteral("SURCHARGE 0-250 V AC (%1 A > 5 A)").arg(fmt(iMac, 1));
+        if (iMdc > 5.05) w << QStringLiteral("SURCHARGE 0-250 V DC (%1 A > 5 A)").arg(fmt(iMdc, 1));
+        if (iTac > 10.1) w << QStringLiteral("SURCHARGE 0-430 V AC (%1 A > 10 A)").arg(fmt(iTac, 1));
+        if (iTdc > 20.2) w << QStringLiteral("SURCHARGE 0-270 V DC (%1 A > 20 A)").arg(fmt(iTdc, 1));
+        if (!note.isEmpty()) w << note;
+        warn = w.join("  -  ");
+    }
+
+    // ---------------------------------------------------------------- manoeuvres
+    QPointF dialC(bool tri) const { return tri ? QPointF(240, 506) : QPointF(240, 700); }
+    double dialR(bool tri) const { return tri ? 82 : 52; }
+    Ctl hit(QPointF p, QString *tip = nullptr) const {
+        for (bool tri : {true, false})
+            if (QLineF(p, dialC(tri)).length() <= dialR(tri) + 6) {
+                if (tip) *tip = tri ? QStringLiteral("Grande molette : variable TRIPHASE (%1 %). Molette de la souris ou glisser pour tourner.").arg(fmt(params[PTri].value, 0))
+                                    : QStringLiteral("Petite molette : variable MONOPHASE (%1 %). Molette de la souris ou glisser pour tourner.").arg(fmt(params[PMono].value, 0));
+                return tri ? CDialT : CDialM;
+            }
+        for (const Zone &z : zones)
+            if (z.r.contains(p)) { if (tip) *tip = z.tip; return z.c; }
+        return CNone;
+    }
+    void act(Ctl c) {
+        note.clear();
+        auto need = [this](bool ok, const QString &why) { if (!ok) note = why; return ok; };
+        switch (c) {
+        case CSect: set(PSect, !on(PSect)); break;
+        case CAu: set(PAu, !on(PAu)); break;
+        case CGenOn:
+            if (need(on(PSect), QStringLiteral("Fermer d'abord le sectionneur general"))
+                && need(!on(PAu), QStringLiteral("Deverrouiller l'arret d'urgence avant la mise en marche")))
+                set(PGen, true);
+            break;
+        case CGenOff: set(PGen, false); break;
+        case CFixOn: if (need(on(PGen), QStringLiteral("Appuyer d'abord sur MARCHE general"))) set(PFix, true); break;
+        case CFixOff: set(PFix, false); break;
+        case CVmOn: if (need(on(PGen), QStringLiteral("Appuyer d'abord sur MARCHE general"))) set(PVarM, true); break;
+        case CVmOff: set(PVarM, false); break;
+        case CVtOn: if (need(on(PGen), QStringLiteral("Appuyer d'abord sur MARCHE general"))) set(PVarT, true); break;
+        case CVtOff: set(PVarT, false); break;
+        case CSelM: set(PSelM, !on(PSelM)); break;
+        case CSelT: set(PSelT, !on(PSelT)); break;
+        default: break;
+        }
+        normalize();
+        update();
+        if (changed) changed();
+    }
+    void turn(bool tri, QPointF p) {                 // la molette suit le pointeur (0 % en bas a gauche, 100 % en bas a droite)
+        const QPointF d = p - dialC(tri);
+        double a = qRadiansToDegrees(std::atan2(d.x(), -d.y()));
+        a = qBound(-150.0, a, 150.0);
+        params[tri ? PTri : PMono].value = qRound((a + 150.0) / 3.0);
+        note.clear();
+        update();
+        if (changed) changed();
+    }
+
+protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent *e) override {
+        const Ctl c = e->button() == Qt::LeftButton ? hit(e->pos()) : CNone;
+        if (c == CDialT || c == CDialM) { drag = c; turn(c == CDialT, e->pos()); e->accept(); return; }
+        if (c != CNone) { act(c); e->accept(); return; }
+        BenchModule::mousePressEvent(e);
+    }
+    void mouseMoveEvent(QGraphicsSceneMouseEvent *e) override {
+        if (drag != CNone) { turn(drag == CDialT, e->pos()); e->accept(); return; }
+        BenchModule::mouseMoveEvent(e);
+    }
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent *e) override {
+        if (drag != CNone) { drag = CNone; e->accept(); return; }
+        BenchModule::mouseReleaseEvent(e);
+    }
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *e) override {      // un double-clic reste une manoeuvre, pas une fenetre
+        const Ctl c = hit(e->pos());
+        if (c != CNone && c != CDialT && c != CDialM) act(c);
+        e->accept();
+    }
+    void wheelEvent(QGraphicsSceneWheelEvent *e) override {
+        const Ctl c = hit(e->pos());
+        if (c != CDialT && c != CDialM) { e->ignore(); return; }
+        BenchParam &p = params[c == CDialT ? PTri : PMono];
+        const double step = (e->modifiers() & Qt::ShiftModifier) ? 5 : 1;
+        p.value = qBound(0.0, p.value + (e->delta() > 0 ? step : -step), 100.0);
+        note.clear();
+        update();
+        if (changed) changed();
+        e->accept();
+    }
+    void hoverMoveEvent(QGraphicsSceneHoverEvent *e) override {
+        QString tip;
+        hit(e->pos(), &tip);
+        setToolTip(tip);
+        setCursor(tip.isEmpty() ? Qt::ArrowCursor : Qt::PointingHandCursor);
+    }
+
+public:
+    QPainterPath bodyPath() const override {         // zones cliquables : console, plateau, caisson, pied
+        QPainterPath b;
+        b.addRect(QRectF(OX, 0, CW, CH));
+        b.addRect(QRectF(0, CH, w, 56));
+        b.addRect(QRectF(70, CH + 56, 340, 424));
+        b.addRect(QRectF(w - 110, CH + 56, 50, 424));
+        return b;
+    }
+
+    // ---------------------------------------------------------------- dessin
+    static void px(QPainter *p, int size, bool bold = true) { QFont f = p->font(); f.setPixelSize(size); f.setBold(bold); p->setFont(f); }
+    static void plate(QPainter *p, double cx, double cy, const QString &t, bool red = false, int size = 9) {
+        px(p, size);
+        const QStringList lines = t.split('\n');
+        double tw = 0;
+        for (const QString &l : lines) tw = std::max(tw, (double)QFontMetricsF(p->font()).horizontalAdvance(l));
+        const QRectF r(cx - tw / 2 - 9, cy - 4 - 5.5 * lines.size(), tw + 18, 8 + 11.0 * lines.size());
+        p->setPen(QPen(QColor(235, 235, 235), 1));
+        p->setBrush(red ? QColor(205, 40, 45) : QColor(22, 22, 24));
+        p->drawRect(r);
+        p->setPen(Qt::white);
+        p->drawText(r, Qt::AlignCenter, t);
+    }
+    static void bezel(QPainter *p, double cx, double cy) {
+        p->setPen(QPen(QColor(20, 20, 22), 1));
+        p->setBrush(QColor(58, 60, 66));
+        p->drawRect(QRectF(cx - 19, cy - 19, 38, 38));
+    }
+    static void lamp(QPainter *p, double cx, double cy, bool lit, bool label = true) {     // voyant « EN SERVICE »
+        if (label) plate(p, cx, cy - 34, QStringLiteral("EN\nSERVICE"), false, 7);
+        bezel(p, cx, cy);
+        if (lit) { p->setPen(Qt::NoPen); p->setBrush(QColor(60, 255, 190, 70)); p->drawEllipse(QPointF(cx, cy), 25, 25); }
+        p->setPen(QPen(QColor(15, 60, 50), 1.5));
+        p->setBrush(lit ? QColor(40, 235, 170) : QColor(0, 120, 95));
+        p->drawEllipse(QPointF(cx, cy), 15, 15);
         p->setPen(Qt::NoPen);
-        p->setBrush(live() ? QColor(40, 180, 80) : QColor(120, 120, 120));
-        p->drawEllipse(QPointF(30, 45), 9, 9);
-        p->setBrush(params[1].value > 0.5 ? QColor(200, 30, 30) : QColor(120, 40, 40));
-        p->drawEllipse(QPointF(70, 45), 12, 12);
-        p->setPen(QColor(30, 30, 30));
-        QFont f = p->font(); f.setPointSize(8); p->setFont(f);
-        p->drawText(QRectF(100, 30, 220, 30), Qt::AlignVCenter | Qt::AlignLeft,
-                    live() ? QStringLiteral("EN SERVICE - %1 V / phase").arg(fmt(vph(), 0))
-                           : QStringLiteral("HORS TENSION"));
+        p->setBrush(QColor(255, 255, 255, lit ? 150 : 50));
+        p->drawEllipse(QPointF(cx - 5, cy - 5), 5, 4);
     }
-    BenchSocket *pe, *n, *p1, *p2, *p3;
+    static void pushOn(QPainter *p, double cx, double cy, bool lit) {       // poussoir lumineux vert « MARCHE »
+        plate(p, cx, cy - 31, QStringLiteral("MARCHE"), false, 8);
+        bezel(p, cx, cy);
+        p->setPen(QPen(QColor(200, 205, 210), 3));
+        p->setBrush(lit ? QColor(40, 235, 170) : QColor(0, 140, 105));
+        p->drawEllipse(QPointF(cx, cy), 14, 14);
+    }
+    static void pushOff(QPainter *p, double cx, double cy) {                // poussoir rouge « ARRET »
+        plate(p, cx, cy - 31, QStringLiteral("ARRET"), true, 8);
+        bezel(p, cx, cy);
+        p->setPen(QPen(QColor(120, 20, 22), 1.5));
+        p->setBrush(QColor(230, 62, 62));
+        p->drawEllipse(QPointF(cx, cy), 16, 16);
+    }
+    static void keySwitch(QPainter *p, double cx, double cy, bool turned) { // bouton a cle « MARCHE »
+        plate(p, cx, cy - 31, QStringLiteral("MARCHE"), false, 8);
+        bezel(p, cx, cy);
+        p->setPen(QPen(QColor(205, 208, 212), 3));
+        p->setBrush(QColor(20, 20, 22));
+        p->drawEllipse(QPointF(cx, cy), 15, 15);
+        p->save();
+        p->translate(cx, cy);
+        p->rotate(turned ? 45 : -35);
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(190, 192, 196));
+        p->drawEllipse(QPointF(0, 0), 7, 7);
+        p->setBrush(QColor(15, 15, 17));
+        p->drawRoundedRect(QRectF(-3, -17, 6, 24), 2, 2);
+        p->setBrush(Qt::white);
+        p->drawRect(QRectF(-1, -15, 2, 7));
+        p->restore();
+    }
+    static void selector(QPainter *p, double cx, double cy, bool dc) {      // commutateur AC / DC
+        plate(p, cx, cy - 31, QStringLiteral("AC      DC"), false, 8);
+        p->setPen(QPen(QColor(200, 203, 208), 3));
+        p->setBrush(QColor(20, 20, 22));
+        p->drawEllipse(QPointF(cx, cy), 16, 16);
+        p->save();
+        p->translate(cx, cy);
+        p->rotate(dc ? 40 : -40);
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(12, 12, 14));
+        p->drawRoundedRect(QRectF(-5, -20, 10, 40), 4, 4);
+        p->setBrush(Qt::white);
+        p->drawRect(QRectF(-1.2, -18, 2.4, 16));
+        p->restore();
+    }
+    // appareil a cadre mobile : aiguille pivotant en bas a droite, de l'horizontale (0) a la verticale (pleine echelle)
+    static void meter(QPainter *p, double x, double y, const QString &letter, double max, double major, double value) {
+        const QRectF r(OX + x, y, 80, 80);
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(18, 18, 20));
+        p->drawRect(r);
+        p->setBrush(QColor(246, 246, 240));
+        p->drawRect(r.adjusted(6, 6, -6, -6));
+        const QPointF c(r.right() - 16, r.bottom() - 16);
+        const double R = 54;
+        auto pt = [&](double frac, double rad) { const double a = (180.0 - 90.0 * frac) * 3.14159265 / 180.0; return QPointF(c.x() + rad * std::cos(a), c.y() - rad * std::sin(a)); };
+        p->setPen(QPen(QColor(20, 20, 20), 1));
+        px(p, 8, false);
+        const int n = qRound(max / (major / 5.0));
+        for (int i = 0; i <= n; ++i) {
+            const double v = i * major / 5.0, f = v / max;
+            const bool big = (i % 5) == 0;
+            p->drawLine(pt(f, R), pt(f, R - (big ? 7 : 4)));
+            if (big && v > 0) {
+                const QPointF t = pt(f, R - 15);
+                p->drawText(QRectF(t.x() - 14, t.y() - 6, 28, 12), Qt::AlignCenter, QString::number(v, 'f', 0));
+            }
+        }
+        px(p, 14);
+        p->drawText(QRectF(r.left() + 9, r.top() + 7, 20, 18), Qt::AlignLeft | Qt::AlignVCenter, letter);
+        p->setPen(QPen(QColor(15, 15, 15), 2));
+        p->drawLine(pt(std::min(value / max, 1.04), 10), pt(std::min(value / max, 1.04), R - 2));
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(238, 234, 214));
+        p->drawRect(QRectF(r.right() - 36, r.bottom() - 34, 30, 28));
+        p->setBrush(QColor(20, 20, 20));
+        p->drawEllipse(c, 4.5, 4.5);
+    }
+    static void outlet(QPainter *p, double x, double y) {                    // double prise 2P + T
+        p->setPen(QPen(QColor(150, 150, 150), 1));
+        p->setBrush(QColor(250, 250, 250));
+        p->drawRoundedRect(QRectF(OX + x, y, 130, 62), 3, 3);
+        for (int k = 0; k < 2; ++k) {
+            const QPointF c(OX + x + 34 + 62 * k, y + 31);
+            p->setPen(QPen(QColor(205, 205, 205), 1));
+            p->setBrush(QColor(238, 238, 238));
+            p->drawEllipse(c, 24, 24);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(25, 25, 25));
+            p->drawEllipse(c + QPointF(-9, -6), 3, 3);
+            p->drawEllipse(c + QPointF(7, 10), 3, 3);
+            p->setPen(QPen(QColor(150, 150, 150), 3, Qt::SolidLine, Qt::RoundCap));
+            p->drawLine(c + QPointF(4, -6), c + QPointF(12, -9));
+        }
+    }
+    void dial(QPainter *p, bool tri) const {
+        const QPointF c = dialC(tri);
+        const double R = dialR(tri), v = params[tri ? PTri : PMono].value;
+        auto pt = [&](double deg, double rad) { const double a = deg * 3.14159265 / 180.0; return QPointF(c.x() + rad * std::sin(a), c.y() - rad * std::cos(a)); };
+        p->setPen(QPen(QColor(10, 10, 10), 2));
+        p->setBrush(QColor(24, 24, 26));
+        p->drawEllipse(c, R, R);
+        px(p, tri ? 9 : 7, false);
+        for (int i = 0; i <= 50; ++i) {
+            const double a = -150 + 6.0 * i;
+            p->setPen(QPen(QColor(235, 235, 235), (i % 5) == 0 ? 1.6 : 0.8));
+            p->drawLine(pt(a, R - 3), pt(a, R - ((i % 5) == 0 ? 11 : 7)));
+            if ((i % 10) == 0) {
+                const QPointF t = pt(a, R - 20);
+                p->drawText(QRectF(t.x() - 12, t.y() - 6, 24, 12), Qt::AlignCenter, QString::number(i * 2));
+            }
+        }
+        const double a = -150 + 3.0 * v, rk = R * 0.52;
+        p->setPen(QPen(QColor(5, 5, 5), 2));
+        p->setBrush(QColor(42, 42, 46));
+        p->drawEllipse(c, rk, rk);
+        p->setBrush(QColor(30, 30, 33));
+        p->drawEllipse(c, rk * 0.62, rk * 0.62);
+        p->setPen(QPen(Qt::white, tri ? 4 : 3, Qt::SolidLine, Qt::RoundCap));
+        p->drawLine(pt(a, rk * 0.25), pt(a, rk - 3));                          // repere du bouton
+        p->setPen(Qt::NoPen);
+        p->setBrush(Qt::white);
+        QPolygonF idx;
+        idx << pt(a, rk + R * 0.15) << pt(a - 10, rk - 1) << pt(a + 10, rk - 1);
+        p->drawPolygon(idx);
+        p->setPen(QColor(70, 72, 78));
+        px(p, 11);
+        p->drawText(QRectF(c.x() - 150, c.y() + R + 6, 300, 16), Qt::AlignCenter,
+                    tri ? QStringLiteral("VARIABLE TRIPHASE : %1 %").arg(fmt(v, 0)) : QStringLiteral("VARIABLE MONOPHASE : %1 %").arg(fmt(v, 0)));
+    }
+    static void earth(QPainter *p, double cx, double cy) {
+        p->setPen(QPen(Qt::white, 1.4));
+        p->drawLine(QPointF(cx, cy - 5), QPointF(cx, cy - 1));
+        p->drawLine(QPointF(cx - 7, cy - 1), QPointF(cx + 7, cy - 1));
+        p->drawLine(QPointF(cx - 4.5, cy + 2), QPointF(cx + 4.5, cy + 2));
+        p->drawLine(QPointF(cx - 2, cy + 5), QPointF(cx + 2, cy + 5));
+    }
+
+    void paint(QPainter *p, const QStyleOptionGraphicsItem *, QWidget *) override {
+        p->setRenderHint(QPainter::Antialiasing);
+        const QColor frame(84, 86, 94), face(203, 204, 206), steel(196, 200, 204), dark(52, 54, 60);
+
+        // ---- table : plateau, bandeau perfore, caisson des autotransformateurs, pied, traverse
+        const double ty = CH;
+        p->setPen(QPen(QColor(120, 122, 126), 1));
+        p->setBrush(dark);
+        p->drawRect(QRectF(410, ty + 300, w - 520, 26));                       // traverse
+        p->setBrush(steel);
+        p->drawRect(QRectF(w - 110, ty + 56, 50, 424));                        // pied droit
+        p->drawRect(QRectF(70, ty + 56, 340, 424));                            // caisson
+        p->setBrush(dark);
+        p->drawRect(QRectF(30, ty + 26, w - 60, 30));                          // bandeau
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(225, 226, 228));
+        for (double x = 110; x < w - 80; x += 130) p->drawEllipse(QPointF(x, ty + 41), 5, 5);
+        p->setPen(QPen(QColor(20, 20, 22), 1));
+        p->setBrush(QColor(240, 238, 230));
+        p->drawRect(QRectF(0, ty, w, 20));                                     // plateau
+        p->setBrush(QColor(20, 20, 22));
+        p->drawRect(QRectF(0, ty + 20, w, 6));                                 // chant noir
+        dial(p, true);
+        dial(p, false);
+
+        // ---- console
+        p->setPen(QPen(isSelected() ? QColor(40, 110, 220) : QColor(40, 40, 44), isSelected() ? 3 : 1));
+        p->setBrush(frame);
+        p->drawRect(QRectF(OX, 0, CW, CH));
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(34, 34, 38));
+        p->drawRect(QRectF(OX - 6, 0, CW + 12, 34));                           // tablette noire (dessus : appareils de mesure)
+        p->setBrush(face);
+        p->drawRect(QRectF(OX + 20, 50, CW - 40, CH - 68));
+
+        const bool gen = on(PGen);
+        // A - prises PC 230 V (gauche)
+        lamp(p, OX + 115, 108, gen);
+        plate(p, OX + 115, 160, QStringLiteral("PC 230V"));
+        outlet(p, 50, 186);
+        // B - variable monophase, alternatif
+        meter(p, 215, 70, "V", 250, 100, vMac);
+        meter(p, 305, 70, "A", 5, 2, iMac);
+        plate(p, OX + 300, 165, QStringLiteral("0-250V AC"));
+        // C - commandes du variable monophase
+        pushOn(p, OX + 440, 108, on(PVarM));
+        pushOff(p, OX + 510, 108);
+        plate(p, OX + 475, 150, QStringLiteral("VARIABLE"));
+        lamp(p, OX + 420, 222, on(PVarM) && !on(PSelM));
+        selector(p, OX + 475, 222, on(PSelM));
+        lamp(p, OX + 530, 222, on(PVarM) && on(PSelM));
+        // D - variable monophase, continu
+        meter(p, 575, 70, "V", 250, 100, vMdc);
+        meter(p, 665, 70, "A", 5, 2, iMdc);
+        plate(p, OX + 660, 165, QStringLiteral("0-250V DC"));
+        plate(p, OX + 660, 276, QStringLiteral("NE RACCORDER\nQU'UN SEUL APPAREIL"), false, 8);
+        // E - sectionneur general
+        {
+            const QPointF c(OX + 832, 192);
+            p->setPen(QPen(QColor(20, 20, 20), 3));
+            p->setBrush(QColor(250, 215, 30));
+            p->drawRoundedRect(QRectF(c.x() - 42, c.y() - 42, 84, 84), 4, 4);
+            p->setPen(QPen(QColor(20, 20, 20), 1.5));
+            px(p, 10);
+            p->drawText(QRectF(c.x() - 40, c.y() - 41, 20, 14), Qt::AlignCenter, "O");
+            p->drawText(QRectF(c.x() + 20, c.y() - 41, 20, 14), Qt::AlignCenter, "I");
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(225, 60, 60));
+            p->drawEllipse(c, 30, 30);
+            p->save();
+            p->translate(c);
+            p->rotate(on(PSect) ? 45 : -45);
+            p->setBrush(QColor(200, 45, 48));
+            p->drawRoundedRect(QRectF(-9, -40, 18, 62), 6, 6);
+            p->setBrush(QColor(245, 245, 240));
+            p->drawRoundedRect(QRectF(-4, -38, 8, 34), 2, 2);
+            p->restore();
+        }
+        // F - marche / arret general, arret d'urgence
+        pushOn(p, OX + 925, 108, gen);
+        pushOff(p, OX + 995, 108);
+        plate(p, OX + 960, 150, QStringLiteral("GENERAL"));
+        {
+            const QPointF c(OX + 960, 234);
+            p->setPen(QPen(QColor(150, 120, 0), 1));
+            p->setBrush(QColor(250, 215, 30));
+            p->drawEllipse(c, 37, 37);
+            px(p, 9);
+            p->setPen(QColor(20, 20, 20));
+            p->drawText(QRectF(c.x() - 37, c.y() - 36, 74, 13), Qt::AlignCenter, QStringLiteral("ARRET"));
+            const double rr = on(PAu) ? 21 : 25;
+            p->setPen(QPen(QColor(120, 20, 22), 1.5));
+            p->setBrush(on(PAu) ? QColor(190, 40, 44) : QColor(232, 66, 66));
+            p->drawEllipse(c + QPointF(0, 4), rr, rr);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(200, 202, 206));
+            p->drawEllipse(c + QPointF(0, 4), 7, 7);
+            p->setBrush(QColor(30, 30, 30));
+            p->save();
+            p->translate(c + QPointF(0, 4));
+            p->rotate(on(PAu) ? 90 : 0);
+            p->drawRect(QRectF(-1.2, -5, 2.4, 10));
+            p->restore();
+        }
+        // G - sortie fixe TRI 400 V + N
+        keySwitch(p, OX + 1075, 108, on(PFix));
+        lamp(p, OX + 1135, 108, on(PFix));
+        pushOff(p, OX + 1195, 108);
+        plate(p, OX + 1135, 160, QStringLiteral("TRI 400V+N"));
+        // H - variable triphase, alternatif
+        meter(p, 1290, 70, "V", 500, 200, vTac);
+        meter(p, 1380, 70, "A", 10, 5, iTac);
+        plate(p, OX + 1375, 165, QStringLiteral("0-430V AC"));
+        // I - commandes du variable triphase
+        keySwitch(p, OX + 1520, 108, on(PVarT));
+        lamp(p, OX + 1580, 108, on(PVarT));
+        pushOff(p, OX + 1640, 108);
+        plate(p, OX + 1580, 150, QStringLiteral("VARIABLE"));
+        lamp(p, OX + 1525, 222, on(PVarT) && !on(PSelT));
+        selector(p, OX + 1580, 222, on(PSelT));
+        lamp(p, OX + 1635, 222, on(PVarT) && on(PSelT));
+        // J - variable triphase, continu
+        meter(p, 1695, 70, "V", 300, 100, vTdc);
+        meter(p, 1785, 70, "A", 20, 5, iTdc);
+        plate(p, OX + 1780, 165, QStringLiteral("0-270V DC"));
+        plate(p, OX + 1780, 276, QStringLiteral("NE RACCORDER\nQU'UN SEUL APPAREIL"), false, 8);
+        // K - prises PC 230 V (droite)
+        plate(p, OX + 1975, 160, QStringLiteral("PC 230V"));
+        outlet(p, 1910, 186);
+
+        // etiquettes des douilles
+        for (BenchSocket *s : sockets) {
+            const QPointF c = s->pos() + QPointF(0, 26);
+            if (s->name == "PE") { plate(p, c.x(), c.y(), QStringLiteral("    "), false, 8); earth(p, c.x(), c.y()); }
+            else plate(p, c.x(), c.y(), s->name == "-" ? QStringLiteral(" - ") : s->name == "+" ? QStringLiteral(" + ") : s->name, false, 8);
+        }
+
+        if (!warn.isEmpty()) {
+            px(p, 12);
+            p->setPen(QColor(255, 120, 110));
+            p->drawText(QRectF(OX, 8, CW, 20), Qt::AlignCenter, warn);
+        }
+    }
+
+    struct Zone { Ctl c; QRectF r; QString tip; };
+    std::vector<Zone> zones;
+    Ctl drag = CNone;
+    QString note;
+    double vMac = 0, iMac = 0, vMdc = 0, iMdc = 0, vTac = 0, iTac = 0, vTdc = 0, iTdc = 0;
+    BenchSocket *fPe, *fN, *fP[3], *mPe, *mN, *mP, *mPlus, *mMinus, *tPe, *tN, *tP[3], *tPlus, *tMinus;
 };
 
 // ---- Rheostat (3 douilles + PE) -----------------------------------------------------------
@@ -747,18 +1255,29 @@ public:
 // Il est deduit de la douille d'une extremite qui n'a qu'un seul fil et appartient a un appareil sans liaison interne.
 bool wireCurrent(const BenchSolution &s, const BenchWire *w, bcplx &I, double &Idc)
 {
-    BenchSocket *ends[2] = {w->a, w->b};
-    for (int k = 0; k < 2; ++k) {
-        BenchSocket *e = ends[k];
-        if (e->wires.size() != 1 || e->module->hasLinks()) continue;
-        const bcplx in = s.iinAt(e);
-        const double ind = s.iinDcAt(e);
-        I   = (k == 0) ? -in  : in;
-        Idc = (k == 0) ? -ind : ind;
-        if (w->b->module->isSupply() && !w->a->module->isSupply()) { I = -I; Idc = -Idc; }
-        return true;
+    // Loi des noeuds : on retire le fil w, puis on parcourt tout ce qui reste relie a son extremite « a »
+    // (autres fils, liaisons internes des appareils). Le courant du fil est la somme des courants qui
+    // entrent dans les appareils de ce cote. Si l'on retombe sur l'extremite « b », le fil fait partie
+    // d'une boucle de fils : son courant est indetermine.
+    QSet<BenchSocket *> seen;
+    std::vector<BenchSocket *> todo{w->a};
+    seen.insert(w->a);
+    QHash<BenchModule *, std::vector<std::pair<BenchSocket *, BenchSocket *>>> linkCache;
+    while (!todo.empty()) {
+        BenchSocket *x = todo.back(); todo.pop_back();
+        auto push = [&](BenchSocket *y) { if (!seen.contains(y)) { seen.insert(y); todo.push_back(y); } };
+        for (BenchWire *o : x->wires) if (o != w) push(o->a == x ? o->b : o->a);
+        if (x->module->hasLinks()) {
+            if (!linkCache.contains(x->module)) x->module->links(linkCache[x->module]);
+            for (const auto &pr : linkCache[x->module]) { if (pr.first == x) push(pr.second); if (pr.second == x) push(pr.first); }
+        }
     }
-    return false;
+    if (seen.contains(w->b)) return false;
+    bcplx sum(0, 0); double sumDc = 0;
+    for (BenchSocket *x : seen) { sum += s.iinAt(x); sumDc += s.iinDcAt(x); }
+    I = -sum; Idc = -sumDc;                              // compte de a vers b
+    if (w->b->module->isSupply() && !w->a->module->isSupply()) { I = -I; Idc = -Idc; }
+    return true;
 }
 
 // ---- Base des pinces : anneau cliquable + fil pince -----------------------------------------------------------
@@ -890,7 +1409,7 @@ public:
             }
         }
         else if (st == 0) sub_ = QStringLiteral("Cliquez sur l'anneau, puis sur un fil");
-        else if (st == 2) { main_ = "?"; warn = QStringLiteral("FIL AMBIGU"); sub_ = QStringLiteral("plusieurs fils sur la douille"); }
+        else if (st == 2) { main_ = "?"; warn = QStringLiteral("FIL AMBIGU"); sub_ = QStringLiteral("fil dans une boucle"); }
         else if (fn() == 2) { main_ = num(irms); unit_ = "A"; sub_ = "TRMS AC+DC"; }
         else {
             const int g = int(params[1].value + 0.5);
@@ -1028,84 +1547,6 @@ public:
     BenchSocket *out;
 };
 
-// ---- Grosses charges triphasees : une paire de douilles (E/S) par phase, a coupler en etoile ou en triangle ----
-class Load3 : public BenchModule {
-public:
-    enum Type { Res, Ind, Cap };
-    explicit Load3(Type t)
-        : BenchModule(t == Res ? QStringLiteral("Charge resistive triphasee (3 x R)")
-                      : t == Ind ? QStringLiteral("Charge inductive triphasee (3 x L)")
-                                 : QStringLiteral("Charge capacitive triphasee (3 x C)"),
-                      460, 190, t == Res ? QColor(196, 150, 120) : t == Ind ? QColor(160, 148, 130) : QColor(205, 212, 222)),
-          type(t)
-    {
-        for (int k = 0; k < 3; ++k) {
-            e[k] = addSocket(QStringLiteral("E%1").arg(k + 1), cBlack, 50 + 140 * k, 120);
-            s[k] = addSocket(QStringLiteral("S%1").arg(k + 1), cRed, 120 + 140 * k, 120);
-        }
-        if (t == Res)
-            params = { {"Resistance par phase", "ohm", 1, 5000, 100, 5, 1}, {"Courant admissible", "A", 0.1, 100, 5, 0.5, 1} };
-        else if (t == Ind)
-            params = { {"Inductance par phase", "H", 0.005, 5, 0.3, 0.01, 3}, {"Resistance du cuivre", "ohm", 0, 100, 1, 0.1, 2},
-                       {"Courant admissible", "A", 0.1, 100, 5, 0.5, 1} };
-        else
-            params = { {"Capacite par phase", "uF", 0.5, 2000, 50, 1, 1}, {"Tension admissible", "V", 10, 1000, 450, 10, 0} };
-    }
-    bcplx y() const {
-        const double w = PI2 * BenchWindow::kFreq;
-        if (type == Res) return 1.0 / params[0].value;
-        if (type == Ind) return 1.0 / bcplx(params[1].value, w * params[0].value);
-        return bcplx(0, w * params[0].value * 1e-6);
-    }
-    void elements(std::vector<BenchElem> &el) override {
-        for (int k = 0; k < 3; ++k) {
-            double ydc = type == Res ? 1.0 / params[0].value : type == Ind ? 1.0 / std::max(params[1].value, 1e-3) : 0.0;
-            el.push_back({e[k], s[k], y(), ydc});
-        }
-    }
-    void post(const BenchSolution &sol) override {
-        double imax = 0, umax = 0;
-        for (int k = 0; k < 3; ++k) {
-            const bcplx u = sol.at(e[k]) - sol.at(s[k]);
-            umax = std::max(umax, std::abs(u));
-            imax = std::max(imax, std::abs(u * y()));
-        }
-        im = imax;
-        if (type == Cap) warn = umax > params[1].value * 1.001 ? QStringLiteral("SURTENSION %1 V").arg(fmt(umax, 0)) : QString();
-        else warn = imax > params[type == Res ? 1 : 2].value * 1.001 ? QStringLiteral("SURCHARGE %1 A").arg(fmt(imax, 1)) : QString();
-    }
-    void paintExtra(QPainter *p) override {
-        p->setPen(QPen(QColor(40, 40, 40), 2));
-        p->setBrush(Qt::NoBrush);
-        for (int k = 0; k < 3; ++k) {
-            const double x0 = 50 + 140 * k, x1 = 120 + 140 * k;
-            p->drawLine(QPointF(x0, 120), QPointF(x0, 90));
-            p->drawLine(QPointF(x1, 120), QPointF(x1, 90));
-            if (type == Res) {
-                p->drawRect(QRectF(x0, 80, x1 - x0, 20));
-            } else if (type == Ind) {
-                QPainterPath pa; pa.moveTo(x0, 90);
-                const double step = (x1 - x0) / 5.0;
-                for (int i = 0; i < 5; ++i) pa.arcTo(QRectF(x0 + i * step, 78, step, 24), 180, -180);
-                p->drawPath(pa);
-            } else {
-                const double m = (x0 + x1) / 2;
-                p->drawLine(QPointF(x0, 90), QPointF(m - 6, 90)); p->drawLine(QPointF(m + 6, 90), QPointF(x1, 90));
-                p->drawLine(QPointF(m - 6, 72), QPointF(m - 6, 108)); p->drawLine(QPointF(m + 6, 72), QPointF(m + 6, 108));
-            }
-        }
-        p->setPen(QColor(20, 20, 20));
-        QString t;
-        if (type == Res) t = QStringLiteral("R = %1 ohm / phase  -  %2 A max").arg(fmt(params[0].value, 0)).arg(fmt(params[1].value, 1));
-        else if (type == Ind) t = QStringLiteral("L = %1 H  (X = %2 ohm)  -  %3 A max").arg(fmt(params[0].value, 3)).arg(fmt(PI2 * BenchWindow::kFreq * params[0].value, 1)).arg(fmt(params[2].value, 1));
-        else t = QStringLiteral("C = %1 uF  (X = %2 ohm)  -  %3 V max").arg(fmt(params[0].value, 0)).arg(fmt(1e6 / (PI2 * BenchWindow::kFreq * params[0].value), 1)).arg(fmt(params[1].value, 0));
-        p->drawText(QRectF(6, 28, 448, 16), Qt::AlignCenter, t);
-    }
-    Type type;
-    BenchSocket *e[3], *s[3];
-    double im = 0;
-};
-
 // ---- Transformateurs : enroulements accessibles (bornes U1-U2 / u1-u2), a coupler en etoile ou en triangle ----
 // Modele : deux enroulements couples (R + L propres, mutuelle M), inverses en matrice d'admittance.
 struct TrafoModel {
@@ -1220,9 +1661,369 @@ public:
         p->drawText(QRectF(6, h - 32, w - 12, 14), Qt::AlignCenter,
                     QStringLiteral("I1 = %1 A (nom. %2)    I2 = %3 A (nom. %4)").arg(fmt(i1, 2)).arg(fmt(i1n, 2)).arg(fmt(i2, 2)).arg(fmt(i2n, 2)));
     }
+    QString plateHtml() const override {
+        const double sn = params[0].value, u1 = params[1].value, u2 = params[2].value, k = three ? 3.0 : 1.0;
+        return QStringLiteral("<h3>TRANSFORMATEUR %1</h3>"
+            "<table border='1' cellspacing='0' cellpadding='4'>"
+            "<tr><td>Puissance</td><td><b>%2 kVA</b></td><td>Phases</td><td><b>%3</b></td><td>Frequence</td><td><b>50 Hz</b></td></tr>"
+            "<tr><td>Primaire (par enroulement)</td><td><b>%4 V</b></td><td colspan='2'>Courant nominal</td><td colspan='2'><b>%5 A</b></td></tr>"
+            "<tr><td>Secondaire (par enroulement)</td><td><b>%6 V</b></td><td colspan='2'>Courant nominal</td><td colspan='2'><b>%7 A</b></td></tr>"
+            "<tr><td>Tension de court-circuit</td><td><b>%8 %</b></td><td colspan='2'>Courant a vide</td><td colspan='2'><b>%9 %</b></td></tr></table>"
+            "<p>%10</p><p>Les valeurs de la plaque se modifient ci-dessous.</p>")
+            .arg(three ? "TRIPHASE" : "MONOPHASE").arg(fmt(sn / 1000.0, 2)).arg(three ? "TRI" : "MONO")
+            .arg(fmt(u1, 0)).arg(fmt(sn / k / u1, 2)).arg(fmt(u2, 0)).arg(fmt(sn / k / u2, 2)).arg(fmt(params[3].value, 1)).arg(fmt(params[5].value, 1))
+            .arg(three ? QStringLiteral("Couplage a realiser par fils : etoile = U2 V2 W2 (ou u2 v2 w2) ensemble ; triangle = U2 - V1, V2 - W1, W2 - U1. "
+                                        "En etoile la tension entre phases vaut racine de 3 fois la tension d'enroulement.")
+                         : QStringLiteral("Primaire U1 - U2, secondaire u1 - u2."));
+    }
     bool three;
     BenchSocket *p1[3], *p2[3], *s1[3], *s2[3];
     double i1 = 0, i2 = 0, i1n = 0, i2n = 0;
+};
+
+// ---- Chariots de charges : commutateurs en facade, 6 bornes de couplage, entrees TRIPHASE / MONOPHASE --------
+// Les elements sont entre U1-U2, V1-V2, W1-W2 ; les bornes sont disposees comme une plaque a bornes
+// (U1 V1 W1 au-dessus, W2 U2 V2 en dessous) : barrette horizontale en bas = etoile, 3 barrettes verticales = triangle.
+// Entrees TRIPHASE reliees a U1 V1 W1 ; entree MONOPHASE : rouge = U1, bleu = U2.
+class Cart : public BenchModule {
+public:
+    struct Sw { QPointF c; QStringList pos; std::vector<double> pct; int param; };
+    Cart(const QString &t, const QColor &col) : BenchModule(t, 320, 450, col) {
+        setAcceptHoverEvents(true);
+        plateOnly = true;
+    }
+    void terminals(const QColor &triCol) {
+        const char *top[3] = {"U1", "V1", "W1"}, *bot[3] = {"W2", "U2", "V2"};
+        for (int k = 0; k < 3; ++k) a1[k] = addSocket(top[k], QColor(120, 122, 128), 110 + 50 * k, 292);
+        for (int k = 0; k < 3; ++k) bsock[k] = addSocket(bot[k], QColor(120, 122, 128), 110 + 50 * k, 332);
+        a2[0] = bsock[1]; a2[1] = bsock[2]; a2[2] = bsock[0];              // U2, V2, W2
+        pe = addSocket("PE", cPE, 40, 372);
+        for (int k = 0; k < 3; ++k) tri[k] = addSocket(QStringLiteral("L%1").arg(k + 1), triCol, 70 + 40 * k, 412);
+        mB = addSocket("N", cBlue, 230, 412);
+        mR = addSocket("PH", cRed, 280, 412);
+    }
+    bool hasLinks() const override { return true; }
+    void links(std::vector<std::pair<BenchSocket *, BenchSocket *>> &l) override {
+        for (int k = 0; k < 3; ++k) l.push_back({tri[k], a1[k]});
+        l.push_back({mR, a1[0]});
+        l.push_back({mB, a2[0]});
+    }
+    double percent() const {
+        double s = 0;
+        for (const Sw &q : sw) s += q.pct[qBound(0, (int)params[q.param].value, (int)q.pct.size() - 1)];
+        return s;
+    }
+    void addSwitch(QPointF c, const QStringList &pos, std::vector<double> pct) {
+        const int n = (int)pos.size();
+        params.push_back({QStringLiteral("Commutateur %1").arg(sw.size() + 1), "", 0.0, double(n - 1), 0.0, 1.0, 0});
+        sw.push_back({c, pos, std::move(pct), (int)params.size() - 1});
+    }
+    static void drawSwitch(QPainter *p, const Sw &q, int pos, bool dark) {
+        p->setPen(QPen(QColor(20, 20, 20), 1.5));
+        p->setBrush(dark ? QColor(28, 28, 30) : QColor(236, 236, 232));
+        p->drawRoundedRect(QRectF(q.c.x() - 36, q.c.y() - 36, 72, 72), 6, 6);
+        QFont f = p->font(); f.setPixelSize(8); f.setBold(true); p->setFont(f);
+        const int n = (int)q.pos.size();
+        // positions reparties autour du bouton : ARRET en haut, puis dans le sens horaire
+        for (int i = 0; i < n; ++i) {
+            const double a = (n == 2 ? 90.0 * i : 90.0 * i) * 3.14159265 / 180.0;
+            const QPointF t(q.c.x() + 27 * std::sin(a), q.c.y() - 27 * std::cos(a));
+            p->setPen(Qt::NoPen);
+            p->setBrush(i == pos ? QColor(255, 235, 120) : QColor(245, 245, 245));
+            p->drawRoundedRect(QRectF(t.x() - 15, t.y() - 6, 30, 12), 3, 3);
+            p->setPen(QColor(20, 20, 20));
+            p->drawText(QRectF(t.x() - 16, t.y() - 6, 32, 12), Qt::AlignCenter, q.pos[i]);
+        }
+        p->save();
+        p->translate(q.c);
+        p->rotate(90.0 * pos);
+        p->setPen(QPen(QColor(10, 10, 10), 1));
+        p->setBrush(dark ? QColor(60, 60, 64) : QColor(170, 172, 176));
+        p->drawEllipse(QPointF(0, 0), 15, 15);
+        p->setBrush(dark ? QColor(20, 20, 22) : QColor(120, 122, 126));
+        QPolygonF h; h << QPointF(0, -22) << QPointF(6, -4) << QPointF(4, 14) << QPointF(-4, 14) << QPointF(-6, -4);
+        p->drawPolygon(h);
+        p->setBrush(QColor(190, 160, 60));
+        p->drawEllipse(QPointF(0, 0), 3, 3);
+        p->restore();
+    }
+    int swAt(QPointF p) const {
+        for (size_t i = 0; i < sw.size(); ++i)
+            if (QRectF(sw[i].c.x() - 36, sw[i].c.y() - 36, 72, 72).contains(p)) return (int)i;
+        return -1;
+    }
+    void paintTerminals(QPainter *p, const QString &ratingLine) {
+        p->setPen(QPen(QColor(235, 235, 235), 1));
+        p->setBrush(QColor(22, 22, 24));
+        p->drawRect(QRectF(60, 244, 200, 26));
+        QFont f = p->font(); f.setPixelSize(9); f.setBold(true); p->setFont(f);
+        p->setPen(Qt::white);
+        p->drawText(QRectF(60, 244, 200, 26), Qt::AlignCenter, ratingLine);
+        f.setPixelSize(8); p->setFont(f);
+        p->setPen(body.lightness() < 120 ? QColor(240, 240, 240) : QColor(25, 25, 25));
+        p->drawText(QRectF(50, 384, 120, 12), Qt::AlignCenter, QStringLiteral("TRIPHASE"));
+        p->drawText(QRectF(205, 384, 100, 12), Qt::AlignCenter, QStringLiteral("MONOPHASE"));
+        // roulettes
+        p->setPen(QPen(QColor(40, 40, 40), 2));
+        p->setBrush(QColor(225, 70, 70));
+        p->drawEllipse(QPointF(50, h - 2), 10, 10);
+        p->drawEllipse(QPointF(w - 50, h - 2), 10, 10);
+    }
+    QString couplingHtml(const QString &head, const QString &u) const {
+        return head + QStringLiteral(
+            "<p><b>Bornes de couplage</b> (3 elements : U1-U2, V1-V2, W1-W2)</p>"
+            "<pre>   U1   V1   W1\n   W2   U2   V2</pre>"
+            "<table border='1' cellspacing='0' cellpadding='4'>"
+            "<tr><th>Reseau</th><th>Couplage</th><th>Barrettes (fils) a poser</th><th>Alimentation</th></tr>"
+            "<tr><td>TRI 380 / 400 V</td><td>etoile</td><td>W2 - U2 - V2 (rangee du bas)</td><td>TRIPHASE L1 L2 L3</td></tr>"
+            "<tr><td>TRI 220 / 230 V</td><td>triangle</td><td>U1 - W2, V1 - U2, W1 - V2 (verticales)</td><td>TRIPHASE L1 L2 L3</td></tr>"
+            "<tr><td>MONO %1 220 / 230 V</td><td>3 elements en parallele</td><td>U1 - V1 - W1 et W2 - U2 - V2</td><td>MONOPHASE PH / N</td></tr>"
+            "<tr><td>MONO 127 V</td><td>parallele</td><td>comme ci-dessus</td><td>puissance x 1/3</td></tr>"
+            "<tr><td>MONO 110 V</td><td>parallele</td><td>comme ci-dessus</td><td>puissance x 1/4</td></tr>"
+            "</table>"
+            "<p>Reglage actuel des commutateurs : <b>%2 %</b> de la puissance.</p>").arg(u).arg(fmt(percent(), 0));
+    }
+protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent *e) override {
+        const int i = e->button() == Qt::LeftButton ? swAt(e->pos()) : -1;
+        if (i < 0) { BenchModule::mousePressEvent(e); return; }
+        BenchParam &pr = params[sw[i].param];
+        pr.value = (int(pr.value) + 1) % (int)sw[i].pos.size();
+        update();
+        if (changed) changed();
+        e->accept();
+    }
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *e) override {
+        if (swAt(e->pos()) >= 0) { mousePressEvent(e); return; }       // double-clic sur un commutateur = deux crans
+        BenchModule::mouseDoubleClickEvent(e);
+    }
+    void hoverMoveEvent(QGraphicsSceneHoverEvent *e) override {
+        const bool onSw = swAt(e->pos()) >= 0;
+        setToolTip(onSw ? QStringLiteral("Commutateur : cliquer pour passer a la position suivante.")
+                        : QStringLiteral("Double-clic : plaque signaletique et couplages."));
+        setCursor(onSw ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    }
+public:
+    std::vector<Sw> sw;
+    BenchSocket *a1[3], *a2[3], *bsock[3], *pe, *tri[3], *mB, *mR;
+};
+
+class ResCart : public Cart {                        // charge resistive 4 kW
+public:
+    ResCart() : Cart(QStringLiteral("Charge resistive 4 kW"), QColor(150, 128, 92)) {
+        for (double x : {110.0, 210.0}) addSwitch(QPointF(x, 78), {"ARRET", "5 %"}, {0, 5});
+        for (double x : {60.0, 160.0, 260.0}) addSwitch(QPointF(x, 172), {"ARRET", "10 %", "20 %", "30 %"}, {0, 10, 20, 30});
+        terminals(cRed);
+    }
+    double g() const { return percent() / 100.0 / 36.3; }           // 4 kW sous 380 V etoile : 36,3 ohm par element a 100 %
+    void elements(std::vector<BenchElem> &el) override {
+        if (g() <= 0) return;
+        for (int k = 0; k < 3; ++k) el.push_back({a1[k], a2[k], bcplx(g(), 0), g()});
+    }
+    void post(const BenchSolution &s) override {
+        double u = 0, pw = 0;
+        for (int k = 0; k < 3; ++k) {
+            const double ua = std::abs(s.at(a1[k]) - s.at(a2[k])), ud = std::abs(s.dcAt(a1[k]) - s.dcAt(a2[k]));
+            u = std::max({u, ua, ud});
+            pw += (ua * ua + ud * ud) * g();
+        }
+        power = pw;
+        warn = u > 245 ? QStringLiteral("SURTENSION %1 V par element : revoir le couplage").arg(fmt(u, 0)) : QString();
+    }
+    void paintExtra(QPainter *p) override {
+        for (const Sw &q : sw) drawSwitch(p, q, (int)params[q.param].value, false);
+        paintTerminals(p, QStringLiteral("4 kW  -  %1 %  -  %2 W").arg(fmt(percent(), 0)).arg(fmt(power, 0)));
+    }
+    QString plateHtml() const override {
+        return couplingHtml(QStringLiteral("<h3>Charge resistive - 4 kW</h3>"
+            "<p>4 kW TRI 380 V (etoile) &nbsp;|&nbsp; 4 kW TRI 220 V (triangle) &nbsp;|&nbsp; 4 kW MONO ou CONTINU 220 V<br>"
+            "1,33 kW sous 127 V &nbsp;|&nbsp; 1 kW sous 110 V</p>"
+            "<p>Commutateurs : 2 x (ARRET / 5 %) et 3 x (ARRET / 10 / 20 / 30 %). Element : 36,3 ohm a 100 %, 220 V max.</p>"),
+            QStringLiteral("ou CONTINU"));
+    }
+    double power = 0;
+};
+
+class CapCart : public Cart {                        // charge capacitive 4 kvar
+public:
+    CapCart() : Cart(QStringLiteral("Charge capacitive 4 kVAR"), QColor(150, 140, 110)) {
+        const double pc[6] = {5, 10, 10, 25, 25, 25};
+        for (int i = 0; i < 6; ++i)
+            addSwitch(QPointF(60 + 100 * (i % 3), i < 3 ? 78 : 172), {"ARRET", QStringLiteral("%1 %").arg(pc[i])}, {0, pc[i]});
+        terminals(cRed);
+    }
+    double cap() const { return percent() / 100.0 * 87.7e-6; }      // 4 kvar sous 380 V etoile : 87,7 uF par element a 100 %
+    void elements(std::vector<BenchElem> &el) override {
+        if (cap() <= 0) return;
+        for (int k = 0; k < 3; ++k) el.push_back({a1[k], a2[k], bcplx(0, PI2 * BenchWindow::kFreq * cap()), 0.0});
+    }
+    void post(const BenchSolution &s) override {
+        double u = 0, q = 0;
+        for (int k = 0; k < 3; ++k) {
+            const double ua = std::abs(s.at(a1[k]) - s.at(a2[k]));
+            u = std::max({u, ua, std::abs(s.dcAt(a1[k]) - s.dcAt(a2[k]))});
+            q += ua * ua * PI2 * BenchWindow::kFreq * cap();
+        }
+        qvar = q;
+        warn = u > 245 ? QStringLiteral("SURTENSION %1 V par element : revoir le couplage").arg(fmt(u, 0)) : QString();
+    }
+    void paintExtra(QPainter *p) override {
+        for (const Sw &q : sw) drawSwitch(p, q, (int)params[q.param].value, true);
+        paintTerminals(p, QStringLiteral("4 kVAR  -  %1 %  -  %2 var").arg(fmt(percent(), 0)).arg(fmt(qvar, 0)));
+    }
+    QString plateHtml() const override {
+        return couplingHtml(QStringLiteral("<h3>Charge capacitive - 4 kVAR</h3>"
+            "<p>4 kVA TRI 380 V (etoile) &nbsp;|&nbsp; 4 kVA TRI 220 V (triangle) &nbsp;|&nbsp; 4 kVA MONO 220 V<br>"
+            "1,33 kVA sous 127 V &nbsp;|&nbsp; 1 kVA sous 110 V</p>"
+            "<p>Commutateurs : 5 %, 10 %, 10 %, 25 %, 25 %, 25 %. Element : 87,7 uF a 100 %, 220 V max.</p>"), QString());
+    }
+    double qvar = 0;
+};
+
+// ---- Charge inductive a noyau plongeur : 6 bobinages (2 par phase), volant de reglage sur la face ------------
+class IndCart : public BenchModule {
+public:
+    IndCart() : BenchModule(QStringLiteral("Charge inductive reglable"), 320, 450, QColor(150, 128, 92)) {
+        setAcceptHoverEvents(true);
+        plateOnly = true;
+        for (int g = 0; g < 3; ++g)
+            for (int r = 0; r < 2; ++r) {
+                const int n = 2 * g + r + 1;
+                const double x0 = 45 + 95 * g, y = 62 + 44 * r;
+                e[n - 1] = addSocket(QStringLiteral("E%1").arg(n), QColor(110, 80, 50), x0, y);
+                s[n - 1] = addSocket(QStringLiteral("S%1").arg(n), QColor(110, 80, 50), x0 + 42, y);
+            }
+        for (int k = 0; k < 6; ++k) spare[k] = addSocket(QStringLiteral("R%1").arg(k + 1), QColor(40, 150, 70), 110 + 50 * (k % 3), 300 + 38 * (k / 3));
+        pe = addSocket("PE", cPE, 40, 372);
+        mB = addSocket("N", cBlue, 40, 412);
+        mR = addSocket("PH", cRed, 85, 412);
+        for (int k = 0; k < 3; ++k) tri[k] = addSocket(QStringLiteral("L%1").arg(k + 1), cBlack, 190 + 45 * k, 412);
+        params = { {"Position du volant (0 = L min, 100 = L max)", "%", 0, 100, 100, 1, 0} };
+    }
+    bool hasLinks() const override { return true; }
+    void links(std::vector<std::pair<BenchSocket *, BenchSocket *>> &l) override {
+        for (int k = 0; k < 3; ++k) l.push_back({tri[k], e[2 * k]});            // L1 = E1, L2 = E3, L3 = E5
+        l.push_back({mR, e[0]});
+        l.push_back({mB, s[1]});                                                  // N = S2
+    }
+    double L1() const { return 0.019 + (0.214 - 0.019) * params[0].value / 100.0; }   // un bobinage seul
+    TrafoModel pair() const {                         // deux bobinages d'une meme colonne : couplage magnetique serre
+        TrafoModel m{};
+        const double wl = PI2 * BenchWindow::kFreq * L1(), r = 0.92;
+        const bcplx z(r, wl), zm(0, 0.995 * wl), det = z * z - zm * zm;
+        m.y11 = z / det; m.y22 = z / det; m.y12 = -zm / det;
+        m.r1 = m.r2 = r;
+        return m;
+    }
+    void elements(std::vector<BenchElem> &el) override {
+        const TrafoModel m = pair();
+        for (int g = 0; g < 3; ++g) m.stamp(e[2 * g], s[2 * g], e[2 * g + 1], s[2 * g + 1], el);
+    }
+    void post(const BenchSolution &sol) override {
+        const TrafoModel m = pair();
+        double im = 0;
+        for (int g = 0; g < 3; ++g) {
+            const bcplx v1 = sol.at(e[2 * g]) - sol.at(s[2 * g]), v2 = sol.at(e[2 * g + 1]) - sol.at(s[2 * g + 1]);
+            im = std::max({im, std::abs(m.i1(v1, v2)), std::abs(m.i2(v1, v2)),
+                           std::abs(sol.dcAt(e[2 * g]) - sol.dcAt(s[2 * g])) / 0.92, std::abs(sol.dcAt(e[2 * g + 1]) - sol.dcAt(s[2 * g + 1])) / 0.92});
+        }
+        imax = im;
+        warn = im > 6.55 ? QStringLiteral("SURCHARGE %1 A par bobinage (6,5 A permanent)").arg(fmt(im, 1)) : QString();
+    }
+    QPointF dialC() const { return QPointF(160, 205); }
+    void paintExtra(QPainter *p) override {
+        const QPointF c = dialC();
+        // volant de reglage
+        p->setPen(QPen(QColor(15, 15, 15), 1));
+        p->setBrush(QColor(225, 225, 220));
+        p->drawEllipse(c, 30, 30);
+        p->setPen(QPen(QColor(15, 15, 15), 9));
+        p->setBrush(Qt::NoBrush);
+        p->drawEllipse(c, 50, 50);
+        p->save();
+        p->translate(c);
+        p->rotate(-150 + 3.0 * params[0].value);
+        p->setPen(QPen(QColor(15, 15, 15), 6, Qt::SolidLine, Qt::RoundCap));
+        for (int k = 0; k < 3; ++k) { p->drawLine(QPointF(0, 0), QPointF(0, -48)); p->rotate(120); }
+        p->setPen(QPen(QColor(200, 202, 206), 5, Qt::SolidLine, Qt::RoundCap));
+        p->drawLine(QPointF(0, -50), QPointF(0, -62));                        // poignee
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(25, 25, 27));
+        p->drawEllipse(QPointF(0, 0), 14, 14);
+        p->restore();
+        QFont f = p->font(); f.setPixelSize(9); f.setBold(true); p->setFont(f);
+        p->setPen(QColor(25, 25, 25));
+        p->drawText(QRectF(10, 262, 300, 14), Qt::AlignCenter,
+                    QStringLiteral("L = %1 H par bobinage (volant %2 %)  -  I max %3 A").arg(fmt(L1(), 3)).arg(fmt(params[0].value, 0)).arg(fmt(imax, 2)));
+        f.setPixelSize(8); p->setFont(f);
+        p->drawText(QRectF(10, 384, 110, 12), Qt::AlignCenter, QStringLiteral("MONOPHASE"));
+        p->drawText(QRectF(170, 384, 130, 12), Qt::AlignCenter, QStringLiteral("TRIPHASE"));
+        p->setPen(QPen(QColor(40, 40, 40), 2));
+        p->setBrush(QColor(225, 70, 70));
+        p->drawEllipse(QPointF(50, h - 2), 10, 10);
+        p->drawEllipse(QPointF(w - 50, h - 2), 10, 10);
+    }
+    QString plateHtml() const override {
+        return QStringLiteral(
+            "<h3>Charge inductive reglable (noyau plongeur)</h3>"
+            "<table border='1' cellspacing='0' cellpadding='4'><tr><th colspan='2'>PAR BOBINAGE (colonne de 2 enroulements)</th></tr>"
+            "<tr><td><b>Montage PARALLELE</b></td><td>L max = 0,214 H &nbsp; L min = 0,019 H<br>I permanent = 13 A &nbsp; I max interm. = 21,7 A<br>R cuivre = 0,46 ohm</td></tr>"
+            "<tr><td><b>Montage SERIE</b></td><td>L max = 0,856 H &nbsp; L min = 0,076 H<br>I permanent = 6,5 A &nbsp; I max interm. = 10,8 A<br>R cuivre = 1,84 ohm</td></tr></table>"
+            "<p><b>Par colonne</b> (bornes E1 S1 / E2 S2, E3 S3 / E4 S4, E5 S5 / E6 S6)</p>"
+            "<table border='1' cellspacing='0' cellpadding='4'>"
+            "<tr><td>SERIE</td><td>barrettes S1 - E2, S3 - E4, S5 - E6 ; entrees E1 E3 E5, sorties S2 S4 S6</td></tr>"
+            "<tr><td>PARALLELE</td><td>barrettes E1 - E2 et S1 - S2 (idem colonnes 2 et 3)</td></tr></table>"
+            "<p><b>Entre colonnes</b></p>"
+            "<table border='1' cellspacing='0' cellpadding='4'>"
+            "<tr><td>ETOILE</td><td>S6 - S2 - S4 ensemble ; alimentation E1 E3 E5 (douilles TRIPHASE)</td></tr>"
+            "<tr><td>TRIANGLE</td><td>S6 - E1, S2 - E3, S4 - E5 ; alimentation TRIPHASE</td></tr>"
+            "<tr><td>MONO</td><td>S6 - S2 - S4 ensemble et E1 - E3 - E5 ensemble ; alimentation MONOPHASE (PH = E1, N = S2)</td></tr></table>"
+            "<p>Volant : <b>%1 %</b> &nbsp; soit L = %2 H par enroulement (%3 H en serie).</p>")
+            .arg(fmt(params[0].value, 0)).arg(fmt(L1(), 3)).arg(fmt(4 * L1(), 3));
+    }
+protected:
+    bool onDial(QPointF p) const { return QLineF(p, dialC()).length() <= 66; }
+    void turn(QPointF p) {
+        const QPointF d = p - dialC();
+        const double a = qBound(-150.0, qRadiansToDegrees(std::atan2(d.x(), -d.y())), 150.0);
+        params[0].value = qRound((a + 150.0) / 3.0);
+        update();
+        if (changed) changed();
+    }
+    void mousePressEvent(QGraphicsSceneMouseEvent *ev) override {
+        if (ev->button() == Qt::LeftButton && onDial(ev->pos())) { drag = true; turn(ev->pos()); ev->accept(); return; }
+        BenchModule::mousePressEvent(ev);
+    }
+    void mouseMoveEvent(QGraphicsSceneMouseEvent *ev) override {
+        if (drag) { turn(ev->pos()); ev->accept(); return; }
+        BenchModule::mouseMoveEvent(ev);
+    }
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent *ev) override {
+        if (drag) { drag = false; ev->accept(); return; }
+        BenchModule::mouseReleaseEvent(ev);
+    }
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *ev) override {
+        if (onDial(ev->pos())) { ev->accept(); return; }
+        BenchModule::mouseDoubleClickEvent(ev);
+    }
+    void wheelEvent(QGraphicsSceneWheelEvent *ev) override {
+        if (!onDial(ev->pos())) { ev->ignore(); return; }
+        const double step = (ev->modifiers() & Qt::ShiftModifier) ? 5 : 1;
+        params[0].value = qBound(0.0, params[0].value + (ev->delta() > 0 ? step : -step), 100.0);
+        update();
+        if (changed) changed();
+        ev->accept();
+    }
+    void hoverMoveEvent(QGraphicsSceneHoverEvent *ev) override {
+        const bool d = onDial(ev->pos());
+        setToolTip(d ? QStringLiteral("Volant : molette de la souris ou glisser pour regler l'inductance.")
+                     : QStringLiteral("Double-clic : plaque signaletique et couplages."));
+        setCursor(d ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    }
+public:
+    bool drag = false;
+    double imax = 0;
+    BenchSocket *e[6], *s[6], *spare[6], *pe, *mB, *mR, *tri[3];
 };
 
 } // namespace
@@ -1246,6 +2047,9 @@ BenchModule *BenchWindow::addModule(const QString &kind, QPointF pos)
 {
     BenchModule *m = nullptr;
     int i = kinds().indexOf(kind);
+    if (i == 0)                                            // un seul pupitre par banc : c'est le meuble lui-meme
+        for (BenchModule *o : m_modules)
+            if (o->kind == 0) { if (m_label) m_label->setText(QStringLiteral("Le pupitre est deja sur le banc.")); return o; }
     switch (i) {
     case 0: m = new Pupitre; break;
     case 1: m = new Rheostat(1400, 1.0); break;
@@ -1264,9 +2068,9 @@ BenchModule *BenchWindow::addModule(const QString &kind, QPointF pos)
     case 14: m = new PowerClamp(1); break;
     case 15: m = new PowerClamp(2); break;
     case 16: m = new CurrentProbe; break;
-    case 17: m = new Load3(Load3::Res); break;
-    case 18: m = new Load3(Load3::Ind); break;
-    case 19: m = new Load3(Load3::Cap); break;
+    case 17: m = new ResCart; break;
+    case 18: m = new IndCart; break;
+    case 19: m = new CapCart; break;
     case 20: m = new Trafo(false); break;
     case 21: m = new Trafo(true); break;
     default: return nullptr;
@@ -1324,16 +2128,29 @@ void BenchWindow::clearAll()
 
 QPointF BenchWindow::findSlot(BenchModule *m) const
 {
-    const double yMin = m->instrument ? 40 : 700, yMax = m->instrument ? 656 : kTableH - 10;
-    for (double y = yMin; y + m->h <= yMax; y += 10)
-        for (double x = 20; x + m->w <= kTableW - 20; x += 10) {
-            const QRectF r(x, y, m->w, m->h);
-            bool free = true;
-            for (BenchModule *o : m_modules)
-                if (o != m && o->sceneBoundingRect().adjusted(-14, -14, 14, 14).intersects(r)) { free = false; break; }
-            if (free) return QPointF(x, y);
+    // pupitre : place fixe ; appareils : sur la tablette de la console ; charges a gauche, transformateurs a droite
+    if (m->kind == 0) return kBenchPos;
+    const bool trafo = (m->kind == 20 || m->kind == 21);
+    std::vector<QRectF> zones;
+    if (m->instrument) zones = {kZoneTop, kZoneUnder};
+    else if (trafo) zones = {kZoneRight, kZoneUnder, kZoneLeft};
+    else zones = {kZoneLeft, kZoneUnder, kZoneRight};
+    for (const QRectF &z : zones) {
+        const bool onShelf = (z == kZoneTop);              // les appareils sont poses sur la tablette : on remplit par le bas
+        const double span = z.height() - m->h;
+        for (double k = 0; k <= span; k += 10) {
+            const double y = onShelf ? z.bottom() - m->h - k : z.top() + k;
+            for (double x = z.left(); x + m->w <= z.right(); x += 10) {
+                const QRectF r(x, y, m->w, m->h);
+                bool free = true;
+                for (BenchModule *o : m_modules)
+                    if (o != m && o->kind != 0 && o->sceneBoundingRect().adjusted(-14, -14, 14, 14).intersects(r)) { free = false; break; }
+                if (free) return QPointF(x, y);
+            }
         }
-    return QPointF(20 + 20 * (m_modules.size() % 10), yMin);
+    }
+    const QRectF &z = zones[0];                            // plus de place : on pose quand meme le module dans sa zone
+    return QPointF(z.left() + 20 * (m_modules.size() % 10), z == kZoneTop ? z.bottom() - m->h : z.top());
 }
 
 void BenchWindow::arrange()
@@ -1346,16 +2163,21 @@ void BenchWindow::arrange()
 
 void BenchWindow::drawTable()
 {
-    auto *wood = m_scene->addRect(0, 0, kTableW, kTableH, Qt::NoPen, QColor(206, 172, 128));
-    wood->setZValue(-20);
-    auto *rail = m_scene->addRect(0, 0, kTableW, 660, QPen(QColor(110, 115, 125), 3), QColor(188, 194, 204));
-    rail->setZValue(-19);
-    auto *edge = m_scene->addRect(0, 660, kTableW, 8, Qt::NoPen, QColor(120, 90, 60));
-    edge->setZValue(-18);
-    auto *t1 = m_scene->addSimpleText(QStringLiteral("PUPITRE ET APPAREILS DE MESURE"));
-    t1->setPos(14, 8); t1->setBrush(QColor(90, 95, 105)); t1->setZValue(-17);
-    auto *t2 = m_scene->addSimpleText(QStringLiteral("PLAN DE TRAVAIL - CHARGES, TRANSFORMATEURS"));
-    t2->setPos(14, 672); t2->setBrush(QColor(120, 90, 60)); t2->setZValue(-17);
+    auto rect = [this](const QRectF &r, const QPen &pen, const QBrush &br, double z) {
+        auto *it = m_scene->addRect(r, pen, br); it->setZValue(z); return it;
+    };
+    auto label = [this](const QString &t, double x, double y, const QColor &col) {
+        auto *it = m_scene->addSimpleText(t); it->setPos(x, y); it->setBrush(col); it->setZValue(-12);
+    };
+    rect(QRectF(0, 0, kTableW, kFloorY), Qt::NoPen, QColor(236, 232, 214), -30);                     // mur
+    rect(QRectF(0, kFloorY, kTableW, kTableH - kFloorY), Qt::NoPen, QColor(150, 170, 120), -30);     // sol
+    // emplacements au sol, de part et d'autre du banc
+    const QPen dash(QColor(150, 150, 140), 2, Qt::DashLine);
+    rect(kZoneLeft.adjusted(-8, -8, 8, 8), dash, Qt::NoBrush, -25);
+    rect(kZoneRight.adjusted(-8, -8, 8, 8), dash, Qt::NoBrush, -25);
+    label(QStringLiteral("CHARGES (resistive, inductive, capacitive, rheostats...)"), kZoneLeft.left() + 4, kZoneLeft.top() - 28, QColor(120, 120, 110));
+    label(QStringLiteral("TRANSFORMATEURS (monophase, triphase)"), kZoneRight.left() + 4, kZoneRight.top() - 28, QColor(120, 120, 110));
+    label(QStringLiteral("APPAREILS DE MESURE (poses sur la tablette du pupitre)"), kZoneTop.left(), 4, QColor(120, 120, 110));
 }
 
 bool BenchWindow::saveToFile(const QString &path) const
@@ -1419,7 +2241,7 @@ bool BenchWindow::loadFromFile(const QString &path)
 void BenchWindow::showEvent(QShowEvent *e)
 {
     QMainWindow::showEvent(e);
-    if (!m_fitted) { m_fitted = true; m_view->fitInView(QRectF(0, 0, 1900, 1250), Qt::KeepAspectRatio); }
+    if (!m_fitted) { m_fitted = true; m_view->fitInView(kViewBench, Qt::KeepAspectRatio); }
 }
 
 bool BenchWindow::recompute()
@@ -1637,6 +2459,10 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
     edit->addAction(QStringLiteral("Ranger les modules sur la table"), this, [this] { arrange(); });
     edit->addAction(QStringLiteral("Nouveau banc (tout effacer)"), this, [this] { clearAll(); });
     edit->addSeparator();
+    edit->addAction(QStringLiteral("Vue : pupitre"), this, [this] { m_view->fitInView(kViewBench, Qt::KeepAspectRatio); });
+    edit->addAction(QStringLiteral("Vue : console (gros plan)"), this, [this] {
+        m_view->fitInView(QRectF(kBenchPos.x() + 40, kBenchPos.y() - 20, 2120, 360), Qt::KeepAspectRatio); });
+    edit->addAction(QStringLiteral("Vue : banc entier"), this, [this] { m_view->fitInView(QRectF(0, 0, kTableW, kTableH), Qt::KeepAspectRatio); });
     QAction *zin = edit->addAction(QStringLiteral("Zoom +"));
     zin->setShortcut(QKeySequence::ZoomIn);
     connect(zin, &QAction::triggered, this, [this] { m_view->scale(1.2, 1.2); });
@@ -1645,7 +2471,9 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
     connect(zout, &QAction::triggered, this, [this] { m_view->scale(1 / 1.2, 1 / 1.2); });
     menuBar()->addMenu(QStringLiteral("&Aide"))->addAction(QStringLiteral("Mode d'emploi"), this, [this] {
         m_label->setText(QStringLiteral("Glisser d'une douille a une autre = fil. Clic droit sur un fil = le retirer. "
-                                        "Double-clic sur un module = reglages. Molette = reglage principal."));
+                                        "Double-clic sur un module = reglages. Molette = reglage principal. "
+                                        "Pupitre : cliquer sur le sectionneur, les boutons et les commutateurs ; "
+                                        "tourner les molettes a la molette de la souris ou en les faisant glisser."));
     });
 
     m_scene->onConnect = [this](BenchSocket *a, BenchSocket *b) {

@@ -12,7 +12,27 @@ def add(id, name, prefix, pins, ops, props="", role=""):
     for o in ops:
         if isinstance(o, (list, tuple)): flat += list(o)
         elif o: flat.append(o)
-    S.append(("e_" + id, name, GROUP[0], prefix, ps, ";".join(flat), props or "", role))
+    S.append(("e_" + id, name, GROUP[0], prefix, ps, ";".join(flat), norm_props(id, props or "", role), role))
+# Valeurs par defaut particulieres (champ « Valeur » et sa visibilite)
+VAL = {"al_3": ("400V AC/24V DC", True), "bd_x": ("400V", False),
+       "m3_6": ("230/400V", False), "m3_uvw": ("230/400V", False), "m3_pe": ("230/400V", False), "m3_123": ("230/400V", False),
+       "mi_3a": ("230/400V", False), "mi_3b": ("230/400V", False), "mi_3c": ("230/400V", False)}
+def norm_props(id, props, role):
+    """Champs communs a tous les symboles : Valeur, Champ 3, Champ 4 (+ Bobine pour les esclaves, Bornes, Numeros)."""
+    items = [p.split("|") for p in props.split(";") if p]
+    bob = [p for p in items if p[0] == "Bobine"]
+    bor = [p for p in items if p[0] == "Bornes"]
+    others = [p for p in items if p[0] not in ("Bobine", "Bornes", "Numéro")]
+    def val(p): return (p[1] + " " + p[2]).strip()
+    v = ("", "0"); c3 = ("", "0")
+    if others: v = (val(others[0]), others[0][4])
+    if len(others) > 1: c3 = (val(others[1]), others[1][4])
+    if role in ("contact", "power", "thcontact"): v = ("", "1")      # esclave : la valeur affichee est la reference croisee
+    if id in VAL: v = (VAL[id][0], "1" if VAL[id][1] else "0")
+    out = bob + [["Valeur", v[0], "", "Valeur (calibre, tension...)", v[1]],
+                 ["Champ 3", c3[0], "", "Champ libre 3", c3[1]],
+                 ["Champ 4", "", "", "Champ libre 4", "0"]] + bor + [["Numéros", "1", "", "Afficher les numéros de broches", "0"]]
+    return ";".join("|".join(p) for p in out)
 def n(v): return "%g" % round(v, 2)
 def L(*a): return "L " + " ".join(n(v) for v in a)
 def D(*a): return "D " + " ".join(n(v) for v in a)
@@ -241,7 +261,7 @@ G("--- X Contact thermique"); thermal_set("xh")
 def brk_pole(x, cross=True, iso=False, therm=True, mag=True, num=None):
     o = [L(x, -60, x, -39)]
     if cross: o += [L(x - 3, -42, x + 3, -36), L(x - 3, -36, x + 3, -42)]
-    if iso: o += [L(x - 5, -46, x + 5, -46)]
+    if iso: o += [L(x - 5, -34.5, x + 5, -34.5)]
     o += [L(x, -1, x - 15, -39)]
     pts = [x, -1]
     if therm: pts += [x, 19, x + 8, 19, x + 8, 25, x, 25]
@@ -274,19 +294,24 @@ def breaker(k, style="S", iso=False, neutral=False, hand=False, therm=True, mag=
         hx = xl - 26
         o += [D(hx + 14, -18, xl, -18), R(xl - 9, -22, 8, 8), L(hx - 4, -46, hx + 10, -14), L(hx - 9, -43, hx + 1, -49), C(hx + 12, -9, 4)]
     return pins, o
-def gv2(dbl=False):
+def gv2(dbl=False, lever=False):
     xs = xs_of(3); o = []; pins = []
     for i, x in enumerate(xs):
-        o += [L(x, -80, x, -61), L(x - 3, -64, x + 3, -58), L(x - 3, -58, x + 3, -64), L(x - 5, -67, x + 5, -67),
+        o += [L(x, -80, x, -61), L(x - 3, -64, x + 3, -58), L(x - 3, -58, x + 3, -64), L(x - 5, -56.5, x + 5, -56.5),
               L(x, -21, x - 14, -57), L(x, -21, x, -12),
               R(x - 17, -12, 34, 35), P(x, -12, x, -4, x + 11, -4, x + 11, 15, x, 15, x, 23),
               R(x - 17, 23, 34, 33), TI(x, 40, 17, "I>>" if dbl else "I>"), L(x, 56, x, 80),
               TL(x + 6, -73, 7, PW[i][0]), TL(x + 6, 72, 7, PW[i][1])]
         pins += [(x, -80), (x, 80)]
     x1 = xs[0]
-    o += [R(x1 - 52, -53, 28, 28), L(x1 - 38, -53, x1 - 38, -25), L(x1 - 52, -39, x1 - 24, -39),
-          L(x1 - 62, -39, x1 - 52, -39), L(x1 - 62, -45, x1 - 62, -33),
-          D(x1 - 24, -39, xs[2] - 7, -39), D(x1 - 38, -25, x1 - 38, 40), D(x1 - 38, 2, x1 - 17, 2), D(x1 - 38, 40, x1 - 17, 40)]
+    if lever:                                   # commande par levier (poignee), verrou en pointille
+        o += [L(x1 - 73.5, -58, x1 - 60.5, -20.5), L(x1 - 77, -54, x1 - 67, -56.5), C(x1 - 60, -16, 4.5),
+              D(x1 - 66, -40, xs[2] - 7, -40), DP(x1 - 46, -47, x1 - 31, -47, x1 - 31, -32, x1 - 46, -32, x1 - 46, -47),
+              D(x1 - 38.5, -32, x1 - 38.5, 37), D(x1 - 38.5, 6, x1 - 17, 6), D(x1 - 38.5, 37, x1 - 17, 37)]
+    else:
+        o += [R(x1 - 52, -53, 28, 28), L(x1 - 38, -53, x1 - 38, -25), L(x1 - 52, -39, x1 - 24, -39),
+              L(x1 - 62, -39, x1 - 52, -39), L(x1 - 62, -45, x1 - 62, -33),
+              D(x1 - 24, -39, xs[2] - 7, -39), D(x1 - 38, -25, x1 - 38, 40), D(x1 - 38, 2, x1 - 17, 2), D(x1 - 38, 40, x1 - 17, 40)]
     return pins, o
 
 G("--- X Disjoncteur")
@@ -338,7 +363,7 @@ add("al_2", "Alimentation AC/DC avec terre", "G", [(-20, -60), (20, -60), (-60, 
      T(-40, 33, 7, "0V"), T(-20, 33, 7, "0V"), T(20, 33, 7, "24V"), T(40, 33, 7, "24V")])
 add("al_3", "Alimentation 400 Vac / 24 Vdc", "G", [(-20, -60), (20, -60), (-20, 60), (20, 60)],
     [R(-60, -40, 120, 80), L(-60, 40, 60, -40), L(-20, -60, -20, -40), L(20, -60, 20, -40), L(-20, 40, -20, 60), L(20, 40, 20, 60),
-     T(-28, -16, 10, "400Vac"), T(28, 18, 10, "24Vdc")])
+     T(-28, -16, 10, "400Vac"), T(28, 18, 10, "24Vdc"), TL(-16, -50, 8, "1"), TL(24, -50, 8, "2"), TL(-16, 50, 8, "1"), TL(24, 50, 8, "2")])
 add("al_4", "Alimentation redressée 0-230-400 V", "G", [(-20, -60), (0, -60), (20, -60), (-10, 60), (10, 60), (-40, 60)],
     [R(-30, -40, 60, 80), L(-20, -60, -20, -40), L(0, -60, 0, -40), L(20, -60, 20, -40), L(-10, 40, -10, 60), L(10, 40, 10, 60),
      T(-20, -33, 7, "0V"), T(0, -33, 7, "230V"), T(20, -33, 7, "400V"), T(-10, 33, 7, "-"), T(10, 33, 7, "+"),
@@ -720,7 +745,7 @@ G("Disjoncteurs Moteurs")
 p, o = sec_multi(NUM[:3], hand=True); add("dmo_sf", "Sectionneur porte-fusibles 3P à poignée", "Q", p, o)
 p, o = gv2(True); add("dmo_gvm", "Disjoncteur moteur 3P (magnétique I>>)", "Q", p, o, props(prop("Réglage", "4 à 6,3", "A", "Plage de réglage", True)))
 p, o = breaker(3, "C", hand=True); add("dmo_mt", "Disjoncteur moteur magnéto-thermique 3P à commande manuelle", "Q", p, o)
-p, o = gv2(); add("dmo_gv", "Disjoncteur moteur magnéto-thermique 3P", "Q", p, o, props(prop("Réglage", "4 à 6,3", "A", "Plage de réglage thermique", True)))
+p, o = gv2(lever=True); add("dmo_gv", "Disjoncteur moteur magnéto-thermique 3P", "Q", p, o, props(prop("Réglage", "4 à 6,3", "A", "Plage de réglage thermique", True)))
 
 # ------------------------------------------------------------------ electrofreins / electrovannes
 G("Electrofreins")
@@ -870,7 +895,7 @@ def motor_top(id, name, t1, t2, labels, r=26, double=False, pe=False, bottom=Non
             pins.append((x, 60))
     if pe:
         px = xs[-1] + 40
-        o += [L(px, -60, px, 30), TL(px + 4, -54, 7, "PE"), "DD %s 0 %s 0" % (n(r), n(px)), L(px - 10, 30, px + 10, 30), L(px - 6, 35, px + 6, 35), L(px - 2, 40, px + 2, 40)]
+        o += [L(px, -60, px, 30), TL(px + 4, -54, 7, pe if isinstance(pe, str) else "PE"), "DD %s 0 %s 0" % (n(r), n(px)), L(px - 10, 30, px + 10, 30), L(px - 6, 35, px + 6, 35), L(px - 2, 40, px + 2, 40)]
         pins.append((px, -60))
     add(id, name, pref, pins, o, props(prop("Puissance", "1,5", "kW", "Puissance utile", True)))
 G("Moteurs (norme IEC60617)")
@@ -906,7 +931,7 @@ G("Moteurs Triphasés")
 motor_top("m3_6", "Moteur triphasé 6 bornes (1U 1V 1W / 2U 2V 2W)", "M", "3 ~", ["1U", "1V", "1W"], r=28, bottom=["2U", "2V", "2W"])
 motor_top("m3_uvw", "Moteur triphasé U V W", "M", "3 ~", ["U", "V", "W"], r=30, double=True)
 motor_top("m3_pe", "Moteur triphasé U V W + PE", "M", "3 ~", ["U", "V", "W"], r=26, double=True, pe=True)
-motor_top("m3_123", "Moteur triphasé 1 2 3 + terre", "M", "3 ~", ["1", "2", "3"], r=26, double=True, pe=True)
+motor_top("m3_123", "Moteur triphasé 1 2 3 + terre (4)", "M", "3 ~", ["1", "2", "3"], r=26, double=True, pe="4")
 
 # ------------------------------------------------------------------ photovoltaique
 G("Photovoltaïque")

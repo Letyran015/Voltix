@@ -104,6 +104,7 @@ public:
     virtual void links(std::vector<std::pair<BenchSocket *, BenchSocket *>> &) {}   // douilles reliees en interne
     virtual void post(const BenchSolution &) {}
     virtual void paintExtra(QPainter *) {}
+    virtual QString plateHtml() const { return QString(); }   // plaque signaletique (double-clic)
     virtual bool isSupply() const { return false; }
     virtual bool hasLinks() const { return false; }
     virtual bool canClamp() const { return false; }
@@ -117,6 +118,7 @@ public:
     std::vector<BenchSocket *> sockets;
     std::vector<BenchParam> params;
     int wheelParam = -1;
+    bool plateOnly = false;      // double-clic : plaque seule, sans formulaire de reglages
     bool instrument = false;     // pupitre / appareils : rail du haut ; sinon plan de travail
     int kind = -1;               // rang dans BenchWindow::kinds()
     QString warn;

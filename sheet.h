@@ -22,6 +22,15 @@ public:
         return paper == "A3" ? QSizeF(1680, 1188) : QSizeF(1188, 840);
     }
 
+    // Lettre de la colonne du cadre qui contient l'abscisse x (repérage « folio - colonne »)
+    static QString columnOf(const QString &paper, qreal x)
+    {
+        const QRectF inner = QRectF(QPointF(0, 0), paperSize(paper)).adjusted(44, 44, -44, -44);
+        const int cols = qMax(4, qRound(inner.width() / 80.0));
+        const int c = qBound(0, int((x - inner.left()) / (inner.width() / cols)), cols - 1);
+        return QString(QChar('A' + (c % 26)));
+    }
+
     void setInfo(const ProjectInfo &pi, int index, int count, const QString &folioTitle)
     {
         prepareGeometryChange();
