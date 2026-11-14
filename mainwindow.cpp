@@ -247,6 +247,19 @@ MainWindow::~MainWindow()
 
 void MainWindow::enterModule(int module)
 {
+    // Un schéma appartient à un module : en changer ne reprend jamais le schéma de l'autre module.
+    // On propose d'enregistrer s'il a été modifié, puis on repart d'une feuille vide.
+    if (m_docModule != 0 && m_docModule != module) {
+        if (!maybeSave()) {                              // « Annuler » : on reste où l'on est
+            for (int i = 0; i < m_modActs.size() && i < 3; ++i)
+                m_modActs[i]->setChecked(kMods[i] == m_module);
+            return;
+        }
+        m_view->clearAll();
+        m_path.clear();
+        updateState();
+    }
+    m_docModule = module;
     m_module = module;
     QSettings().setValue("ui/module", module);
     for (int i = 0; i < m_modActs.size() && i < 3; ++i)

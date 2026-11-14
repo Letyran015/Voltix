@@ -118,8 +118,12 @@ private:
         QTreeWidgetItem *found = nullptr, *first = nullptr;
 
         for (const CatalogEntry &e : catalog()) {
+            if (e.modules == 0)                                   // ancien symbole, plus proposé
+                continue;
             if (!all && !(e.modules & m_module))
                 continue;
+            if (!all && m_module == ModElectrotech && !e.id.startsWith("e_"))
+                continue;                                         // électrotechnique : uniquement la bibliothèque normalisée
             if (!needle.isEmpty() && !e.name.contains(needle, Qt::CaseInsensitive))
                 continue;
 
@@ -144,6 +148,12 @@ private:
         if (!target)
             return;
         m_tree->setCurrentItem(target);
+        if (needle.isEmpty() && !all && m_module == ModElectrotech) {
+            m_tree->collapseAll();                   // bibliothèque volumineuse : dossiers repliés, comme un explorateur
+            if (found && found->parent())
+                found->parent()->setExpanded(true);
+            m_tree->scrollToTop();
+        }
         const QString id = target->data(0, Qt::UserRole).toString();
         if (id != m_current) {                       // le composant précédent n'existe plus ici
             m_current = id;

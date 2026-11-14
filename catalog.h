@@ -1,4 +1,6 @@
 #pragma once
+#include "elib_spec.h"
+#include "elib_data.h"
 #include <QList>
 #include <QString>
 
@@ -58,6 +60,7 @@ inline const QList<CatalogEntry> &catalog()
                                   {"ind_fe",   "Inductance à noyau de fer",      "Composants passifs", ModAll},
                                   {"ind_var",  "Inductance variable",            "Composants passifs", ModAll},
                                   {"transformer", "Transformateur",    "Composants passifs", ModAll},
+                                  {"transformer_iec", "Transformateur (deux cercles)", "Composants passifs", ModElectrotech | ModElectromag},
                                   {"transformer_ip", "Transformateur (secondaire en phase)",          "Composants passifs", ModAll},
                                   {"transformer_op", "Transformateur (secondaire en opposition de phase)", "Composants passifs", ModAll},
                                   {"capacitor",   "Condensateur",      "Composants passifs", ModAll},
@@ -178,6 +181,17 @@ inline const QList<CatalogEntry> &catalog()
         v.append({"selector",      "Commutateur à clé / sélecteur", k, ModElectrotech});
         v.append({"lamp",          "Voyant",               k, ModElectrotech});
         v.append({"buzzer",        "Avertisseur sonore",   k, ModElectrotech});
+        // Électrotechnique : la bibliothèque affichée est celle de elib_data.h (dossiers façon WinRelais).
+        // Les anciens symboles restent connus (ouverture des anciens schémas) mais ne sont plus proposés.
+        for (CatalogEntry &e : v) {
+            if (e.modules == ModElectrotech)
+                e.modules = 0;
+            else if (e.modules == (ModElectrotech | ModElectromag))
+                e.modules = ModElectromag;
+        }
+        for (int i = 0; i < kLibCount; ++i)
+            v.append({QString::fromUtf8(kLib[i].id), QString::fromUtf8(kLib[i].name),
+                      QString::fromUtf8(kLib[i].group), ModElectrotech});
         return v;
     }();
     return c;

@@ -1,3 +1,4 @@
+#include "elib.h"
 #include "schemaview.h"
 #include "symbolitem.h"
 #include "wireitem.h"
@@ -1037,30 +1038,34 @@ void SchemaView::verifyElectrical()
     });
 
     // cohérence des repères dans tout le projet
-    static const QSet<QString> contactKinds = {"contact_no", "contact_nc", "contact_co",
-                                               "contact_td_no", "contact_td_nc", "thermal_nc"};
     QSet<QString> coils, contactors, thermals, used;
     for (const Rec &r : std::as_const(recs)) {
         const QString key = r.ref.toLower();
-        if (r.kind == "coil" || r.kind == "relay" || r.kind == "timer_coil") {
+        const QString role = electroRole(r.kind);
+        if (role == "coil") {
             if (coils.contains(key))
                 issues << QString("Bobine « %1 » en double.").arg(r.ref);
             coils << key;
-        } else if (r.kind.startsWith("contactor")) {
-            contactors << key;
-        } else if (r.kind == "thermal3") {
+        } else if (role == "thermal") {
             thermals << key;
         }
     }
     for (const Rec &r : std::as_const(recs)) {
-        if (!contactKinds.contains(r.kind))
+        const QString role = electroRole(r.kind);
+        if (role != "contact" && role != "thcontact" && role != "power")
             continue;
-        const QString key = r.bobine.toLower();
+        QString key = r.bobine.toLower();
+        if (role == "power" && key.isEmpty())
+            key = r.ref.toLower();                    // anciens contacteurs : même repère que la bobine
         if (key.isEmpty()) {
             issues << QString("Contact sans bobine associée (%1).").arg(r.ref);
             continue;
         }
-        const bool ok = (r.kind == "thermal_nc") ? thermals.contains(key) : coils.contains(key);
+        if (role == "power") {
+            contactors << key;
+            continue;
+        }
+        const bool ok = (role == "thcontact") ? thermals.contains(key) : coils.contains(key);
         if (!ok)
             issues << QString("Contact « %1 » : aucun repère « %2 » dans le projet.")
                           .arg(r.ref, r.bobine);
@@ -1068,10 +1073,10 @@ void SchemaView::verifyElectrical()
     }
     for (const Rec &r : std::as_const(recs)) {
         const QString key = r.ref.toLower();
-        if ((r.kind == "coil" || r.kind == "relay" || r.kind == "timer_coil")
-            && !used.contains(key) && !contactors.contains(key))
+        const QString role = electroRole(r.kind);
+        if (role == "coil" && !used.contains(key) && !contactors.contains(key))
             issues << QString("Bobine « %1 » : aucun contact ni pôle de puissance associé.").arg(r.ref);
-        if (r.kind == "thermal3" && !used.contains(key))
+        if (role == "thermal" && !used.contains(key))
             issues << QString("Relais thermique « %1 » : aucun contact thermique associé.").arg(r.ref);
     }
 

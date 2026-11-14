@@ -3,7 +3,12 @@
 #include <QFont>
 #include <QLineF>
 #include <QPolygonF>
+#include <QPainterPath>
 #include <cmath>
+
+// dessin commun des contacts (défini en bas) : décor 0 aucun, 1 galet, 2 niveau, 3 pression,
+// 4 température, 5 bouton poussoir, 6 relais thermique, 7 arrêt d'urgence, 8 sélecteur
+void voltixDrawContact(QPainter *p, const SymbolItem *it, bool nc, int decor, bool delay, const QString &bornes);
 
 namespace {
 
@@ -141,10 +146,15 @@ protected:
             p->drawLine(QPointF(x, -40), QPointF(x, -14));
             p->drawLine(QPointF(x, 14), QPointF(x, 40));
             p->drawRect(QRectF(x - 8, -14, 16, 28));
-            QPolygonF z;
-            z << QPointF(x - 5, -8) << QPointF(x + 5, -4) << QPointF(x - 5, 0)
-              << QPointF(x + 5, 4) << QPointF(x - 5, 8);
-            p->drawPolyline(z);                                     // bilame
+            QPainterPath z;                                          // bilame
+            z.moveTo(x, -12);
+            z.cubicTo(x + 9, -11, x + 9, -2, x, -2);
+            z.cubicTo(x - 9, -1, x - 9, 8, x, 8);
+            z.lineTo(x, 12);
+            p->save();
+            p->setBrush(Qt::NoBrush);
+            p->drawPath(z);
+            p->restore();
         }
     }
 };
@@ -170,6 +180,7 @@ protected:
     void drawBody(QPainter *p) const override
     {
         p->drawEllipse(QPointF(0, 0), 50, 50);
+        p->drawEllipse(QPointF(0, 0), 44, 44);                      // double anneau (carcasse)
         for (int i = 0; i < 3; ++i) {
             const qreal x = (i - 1) * 40;
             p->drawLine(QPointF(x, -60), QPointF(x, -std::sqrt(2500.0 - x * x)));
@@ -193,14 +204,14 @@ public:
     int pinCount() const override { return 2; }
     QPointF pinLocal(int i) const override { return QPointF(0, i == 0 ? -40 : 40); }
 protected:
-    QRectF bodyRect() const override { return QRectF(-18, -44, 36, 88); }
+    QRectF bodyRect() const override { return QRectF(-26, -44, 62, 88); }
     void drawBody(QPainter *p) const override
     {
-        p->drawLine(QPointF(0, -40), QPointF(0, -20));
-        p->drawLine(QPointF(0, 20), QPointF(0, 40));
-        p->drawRect(QRectF(-14, -20, 28, 40));
-        upright(p, this, QPointF(-1, -32), "A1", 9);
-        upright(p, this, QPointF(-1, 32), "A2", 9);
+        p->drawLine(QPointF(0, -40), QPointF(0, -12));
+        p->drawLine(QPointF(0, 12), QPointF(0, 40));
+        p->drawRect(QRectF(-24, -12, 48, 24));
+        upright(p, this, QPointF(10, -30), "A1", 8);
+        upright(p, this, QPointF(10, 30), "A2", 8);
     }
 private:
     bool m_relay;
@@ -236,6 +247,8 @@ public:
             props = {{"Bornes", "1-2", "", "Repères des bornes", true}};
             break;
         }
+        for (Prop &pr : props)                       // les repères sont dessinés près des bornes
+            if (pr.name == "Bornes") pr.show = false;
     }
     QString prefix() const override
     {
@@ -264,26 +277,15 @@ public:
     int pinCount() const override { return 2; }
     QPointF pinLocal(int i) const override { return QPointF(0, i == 0 ? -40 : 40); }
 protected:
-    QRectF bodyRect() const override { return QRectF(-24, -44, 56, 88); }
+    QRectF bodyRect() const override { return QRectF(-48, -44, 76, 88); }
     void drawBody(QPainter *p) const override
     {
-        p->drawLine(QPointF(0, 40), QPointF(0, 12));
-        p->drawLine(QPointF(0, -40), QPointF(0, -12));
+        QString b;
+        for (const Prop &pr : props)
+            if (pr.name == "Bornes") b = pr.value;
         const bool nc = (m_v == Nc || m_v == PbNc || m_v == ThNc);
-        if (nc) {
-            p->drawLine(QPointF(0, 12), QPointF(-12, -12));
-            p->drawLine(QPointF(0, -12), QPointF(-12, -12));
-        } else {
-            p->drawLine(QPointF(0, 12), QPointF(-12, -8));
-        }
-        if (m_v == PbNo || m_v == PbNc) {
-            dashed(p, QLineF(-6, 0, 14, 0));
-            p->drawLine(QPointF(14, -6), QPointF(14, 6));            // tête du bouton
-        } else if (m_v == ThNc) {
-            dashed(p, QLineF(-6, 0, 10, 0));
-            p->drawRect(QRectF(10, -7, 14, 14));
-            upright(p, this, QPointF(17, 0), QString::fromUtf8("θ"), 10);
-        }
+        const int decor = (m_v == PbNo || m_v == PbNc) ? 5 : m_v == ThNc ? 6 : 0;
+        voltixDrawContact(p, this, nc, decor, false, b);
     }
 private:
     Variant m_v;
@@ -308,13 +310,15 @@ protected:
         p->drawEllipse(QPointF(0, 0), 14, 14);
         p->drawLine(QPointF(-10, -10), QPointF(10, 10));
         p->drawLine(QPointF(-10, 10), QPointF(10, -10));
+        upright(p, this, QPointF(11, -31), "X1", 7);
+        upright(p, this, QPointF(11, 31), "X2", 7);
     }
 };
 // ---------- Transformateur (0-1 primaire, 2-3 secondaire) ----------
 class TransformerItem : public SymbolItem
 {
 public:
-    TransformerItem()
+    explicit TransformerItem(bool iec = false) : m_iec(iec)
     {
         props = {
                   {"Lp", "10m", "H", "Inductance du primaire", true},
@@ -323,17 +327,35 @@ public:
                   };
     }
     QString prefix() const override { return "T"; }
-    QString kind() const override { return "transformer"; }
-    QString title() const override { return "Transformateur"; }
+    QString kind() const override { return m_iec ? "transformer_iec" : "transformer"; }
+    QString title() const override { return m_iec ? "Transformateur (deux cercles)" : "Transformateur"; }
     int pinCount() const override { return 4; }
     QPointF pinLocal(int i) const override
     {
+        if (m_iec)                                   // 0-1 primaire (haut), 2-3 secondaire (bas)
+            return QPointF(i % 2 == 0 ? -20 : 20, i < 2 ? -60 : 60);
         return QPointF(i < 2 ? -20 : 20, (i % 2 == 0) ? -40 : 40);
     }
 protected:
-    QRectF bodyRect() const override { return QRectF(-34, -44, 68, 88); }
+    QRectF bodyRect() const override
+    {
+        return m_iec ? QRectF(-34, -64, 68, 128) : QRectF(-34, -44, 68, 88);
+    }
     void drawBody(QPainter *p) const override
     {
+        if (m_iec) {
+            p->save();
+            p->setBrush(Qt::NoBrush);
+            p->drawEllipse(QPointF(0, -14), 26, 26);
+            p->drawEllipse(QPointF(0, 14), 26, 26);
+            p->restore();
+            for (int s : {-20, 20}) {
+                const qreal dy = std::sqrt(26.0 * 26.0 - 20.0 * 20.0);
+                p->drawLine(QPointF(s, -60), QPointF(s, -14 - dy));
+                p->drawLine(QPointF(s, 60), QPointF(s, 14 + dy));
+            }
+            return;
+        }
         p->drawLine(QPointF(-20, -40), QPointF(-20, -20));
         p->drawLine(QPointF(-20, 20), QPointF(-20, 40));
         p->drawLine(QPointF(20, -40), QPointF(20, -20));
@@ -345,9 +367,96 @@ protected:
         p->drawLine(QPointF(-3, -22), QPointF(-3, 22));                          // noyau
         p->drawLine(QPointF(3, -22), QPointF(3, 22));
     }
+private:
+    bool m_iec;
 };
 
 } // namespace
+
+void voltixDrawContact(QPainter *p, const SymbolItem *it, bool nc, int decor, bool delay, const QString &bornes)
+{
+    auto txt = [&](QPointF c, const QString &t, int px) {
+        p->save();
+        p->translate(c);
+        p->rotate(-it->rotation());
+        QFont f = p->font();
+        f.setPixelSize(px);
+        f.setBold(false);
+        p->setFont(f);
+        p->drawText(QRectF(-20, -px, 40, 2 * px), Qt::AlignCenter, t);
+        p->restore();
+    };
+    auto dash = [&](QPointF a, QPointF b) {
+        p->save();
+        QPen pen = p->pen();
+        pen.setStyle(Qt::DashLine);
+        pen.setWidthF(1.5);
+        p->setPen(pen);
+        p->drawLine(a, b);
+        p->restore();
+    };
+
+    // contact normalisé : NO = lame vers la gauche ; NC = plot fixe en équerre, lame vers la droite
+    p->drawLine(QPointF(0, 40), QPointF(0, 12));
+    if (nc) {
+        p->drawLine(QPointF(0, -40), QPointF(0, -14));
+        p->drawLine(QPointF(0, -14), QPointF(16, -14));
+        p->drawLine(QPointF(0, 12), QPointF(12, -17));
+    } else {
+        p->drawLine(QPointF(0, -40), QPointF(0, -12));
+        p->drawLine(QPointF(0, 12), QPointF(-12, -10));
+    }
+    if (delay)
+        p->drawArc(QRectF(nc ? 14 : -26, -6, 10, 10), nc ? 0 : 180 * 16, 180 * 16);
+
+    // commande, à gauche de la lame (sauf relais thermique : à droite)
+    const qreal bx = nc ? 4 : -5;
+    switch (decor) {
+    case 1:                                                   // galet
+        dash(QPointF(bx, 0), QPointF(-14, 0));
+        p->drawEllipse(QPointF(-18, 0), 4, 4);
+        break;
+    case 2: case 3: case 4: {                                 // niveau, pression, température
+        dash(QPointF(bx, 0), QPointF(-14, 0));
+        p->drawRect(QRectF(-32, -8, 18, 16));
+        const QString lab = decor == 2 ? QString("N") : decor == 3 ? QString("p") : QString::fromUtf8("θ");
+        txt(QPointF(-23, 0), lab, 10);
+        break;
+    }
+    case 5:                                                   // bouton poussoir : « E »
+        dash(QPointF(bx, 0), QPointF(-18, 0));
+        p->drawLine(QPointF(-18, -6), QPointF(-24, -6));
+        p->drawLine(QPointF(-24, -6), QPointF(-24, 6));
+        p->drawLine(QPointF(-24, 6), QPointF(-18, 6));
+        break;
+    case 6:                                                   // élément thermique
+        dash(QPointF(bx, 0), QPointF(12, 0));
+        p->drawLine(QPointF(12, -5), QPointF(18, -5));
+        p->drawLine(QPointF(18, -5), QPointF(18, 5));
+        p->drawLine(QPointF(18, 5), QPointF(12, 5));
+        break;
+    case 7:                                                   // arrêt d'urgence : coup de poing
+        dash(QPointF(bx, 0), QPointF(-12, 0));
+        p->save();
+        p->setBrush(QColor(200, 0, 0));
+        p->drawEllipse(QPointF(-18, 0), 6, 6);
+        p->restore();
+        break;
+    case 8:                                                   // commande rotative / clé
+        dash(QPointF(bx, 0), QPointF(-12, 0));
+        p->drawEllipse(QPointF(-16, 0), 4, 4);
+        break;
+    default:
+        break;
+    }
+
+    // repères des bornes près des extrémités (ex. 13-14, 21-22)
+    const QStringList n = bornes.split('-', Qt::SkipEmptyParts);
+    if (!n.isEmpty())
+        txt(QPointF(nc ? -10 : 11, -33), n[0], 8);
+    if (n.size() > 1)
+        txt(QPointF(11, 33), n[1], 8);
+}
 
 SymbolItem *makeElectroSymbol(const QString &k)
 {
@@ -367,5 +476,6 @@ SymbolItem *makeElectroSymbol(const QString &k)
     if (k == "thermal_nc")    return new ContactItem(ContactItem::ThNc);
     if (k == "lamp")          return new LampItem;
     if (k == "transformer")   return new TransformerItem;
+    if (k == "transformer_iec") return new TransformerItem(true);
     return nullptr;
 }

@@ -46,6 +46,7 @@ private:
     QDockWidget *m_dock = nullptr;
     QString m_path;
     int m_module = 1;
+    int m_docModule = 0;          // module du schéma ouvert (0 = aucun)
     bool m_fitted = false;
     QAction *m_undoAct = nullptr;
     QAction *m_redoAct = nullptr;

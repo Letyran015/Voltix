@@ -27,6 +27,7 @@
 #include <algorithm>
 
 static const double PI2 = 6.283185307179586;
+static const double kTableW = 3300, kTableH = 1500;   // banc allonge : place pour les grosses charges et transformateurs
 
 // =====================================================================================
 //  Douille
@@ -1027,6 +1028,203 @@ public:
     BenchSocket *out;
 };
 
+// ---- Grosses charges triphasees : une paire de douilles (E/S) par phase, a coupler en etoile ou en triangle ----
+class Load3 : public BenchModule {
+public:
+    enum Type { Res, Ind, Cap };
+    explicit Load3(Type t)
+        : BenchModule(t == Res ? QStringLiteral("Charge resistive triphasee (3 x R)")
+                      : t == Ind ? QStringLiteral("Charge inductive triphasee (3 x L)")
+                                 : QStringLiteral("Charge capacitive triphasee (3 x C)"),
+                      460, 190, t == Res ? QColor(196, 150, 120) : t == Ind ? QColor(160, 148, 130) : QColor(205, 212, 222)),
+          type(t)
+    {
+        for (int k = 0; k < 3; ++k) {
+            e[k] = addSocket(QStringLiteral("E%1").arg(k + 1), cBlack, 50 + 140 * k, 120);
+            s[k] = addSocket(QStringLiteral("S%1").arg(k + 1), cRed, 120 + 140 * k, 120);
+        }
+        if (t == Res)
+            params = { {"Resistance par phase", "ohm", 1, 5000, 100, 5, 1}, {"Courant admissible", "A", 0.1, 100, 5, 0.5, 1} };
+        else if (t == Ind)
+            params = { {"Inductance par phase", "H", 0.005, 5, 0.3, 0.01, 3}, {"Resistance du cuivre", "ohm", 0, 100, 1, 0.1, 2},
+                       {"Courant admissible", "A", 0.1, 100, 5, 0.5, 1} };
+        else
+            params = { {"Capacite par phase", "uF", 0.5, 2000, 50, 1, 1}, {"Tension admissible", "V", 10, 1000, 450, 10, 0} };
+    }
+    bcplx y() const {
+        const double w = PI2 * BenchWindow::kFreq;
+        if (type == Res) return 1.0 / params[0].value;
+        if (type == Ind) return 1.0 / bcplx(params[1].value, w * params[0].value);
+        return bcplx(0, w * params[0].value * 1e-6);
+    }
+    void elements(std::vector<BenchElem> &el) override {
+        for (int k = 0; k < 3; ++k) {
+            double ydc = type == Res ? 1.0 / params[0].value : type == Ind ? 1.0 / std::max(params[1].value, 1e-3) : 0.0;
+            el.push_back({e[k], s[k], y(), ydc});
+        }
+    }
+    void post(const BenchSolution &sol) override {
+        double imax = 0, umax = 0;
+        for (int k = 0; k < 3; ++k) {
+            const bcplx u = sol.at(e[k]) - sol.at(s[k]);
+            umax = std::max(umax, std::abs(u));
+            imax = std::max(imax, std::abs(u * y()));
+        }
+        im = imax;
+        if (type == Cap) warn = umax > params[1].value * 1.001 ? QStringLiteral("SURTENSION %1 V").arg(fmt(umax, 0)) : QString();
+        else warn = imax > params[type == Res ? 1 : 2].value * 1.001 ? QStringLiteral("SURCHARGE %1 A").arg(fmt(imax, 1)) : QString();
+    }
+    void paintExtra(QPainter *p) override {
+        p->setPen(QPen(QColor(40, 40, 40), 2));
+        p->setBrush(Qt::NoBrush);
+        for (int k = 0; k < 3; ++k) {
+            const double x0 = 50 + 140 * k, x1 = 120 + 140 * k;
+            p->drawLine(QPointF(x0, 120), QPointF(x0, 90));
+            p->drawLine(QPointF(x1, 120), QPointF(x1, 90));
+            if (type == Res) {
+                p->drawRect(QRectF(x0, 80, x1 - x0, 20));
+            } else if (type == Ind) {
+                QPainterPath pa; pa.moveTo(x0, 90);
+                const double step = (x1 - x0) / 5.0;
+                for (int i = 0; i < 5; ++i) pa.arcTo(QRectF(x0 + i * step, 78, step, 24), 180, -180);
+                p->drawPath(pa);
+            } else {
+                const double m = (x0 + x1) / 2;
+                p->drawLine(QPointF(x0, 90), QPointF(m - 6, 90)); p->drawLine(QPointF(m + 6, 90), QPointF(x1, 90));
+                p->drawLine(QPointF(m - 6, 72), QPointF(m - 6, 108)); p->drawLine(QPointF(m + 6, 72), QPointF(m + 6, 108));
+            }
+        }
+        p->setPen(QColor(20, 20, 20));
+        QString t;
+        if (type == Res) t = QStringLiteral("R = %1 ohm / phase  -  %2 A max").arg(fmt(params[0].value, 0)).arg(fmt(params[1].value, 1));
+        else if (type == Ind) t = QStringLiteral("L = %1 H  (X = %2 ohm)  -  %3 A max").arg(fmt(params[0].value, 3)).arg(fmt(PI2 * BenchWindow::kFreq * params[0].value, 1)).arg(fmt(params[2].value, 1));
+        else t = QStringLiteral("C = %1 uF  (X = %2 ohm)  -  %3 V max").arg(fmt(params[0].value, 0)).arg(fmt(1e6 / (PI2 * BenchWindow::kFreq * params[0].value), 1)).arg(fmt(params[1].value, 0));
+        p->drawText(QRectF(6, 28, 448, 16), Qt::AlignCenter, t);
+    }
+    Type type;
+    BenchSocket *e[3], *s[3];
+    double im = 0;
+};
+
+// ---- Transformateurs : enroulements accessibles (bornes U1-U2 / u1-u2), a coupler en etoile ou en triangle ----
+// Modele : deux enroulements couples (R + L propres, mutuelle M), inverses en matrice d'admittance.
+struct TrafoModel {
+    double sn, u1, u2, ucc, ur, i0;      // VA, V, V, %, %, %
+    double r1 = 0, r2 = 0;
+    bcplx y11, y12, y22;
+    void build() {
+        const double w = PI2 * BenchWindow::kFreq, n = u2 / u1;
+        const double zb = u1 * u1 / sn, xcc = std::sqrt(std::max(1e-12, std::pow(ucc / 100.0 * zb, 2) - std::pow(ur / 100.0 * zb, 2)));
+        const double i1n = sn / u1, xm = u1 / std::max(1e-6, i0 / 100.0 * i1n);
+        r1 = ur / 100.0 * zb / 2; r2 = r1 * n * n;
+        const double lm = xm / w, ls1 = xcc / 2 / w, ls2 = xcc / 2 / w * n * n;
+        const bcplx z11(r1, w * (lm + ls1)), z22(r2, w * (n * n * lm + ls2)), z12(0, w * n * lm);
+        const bcplx det = z11 * z22 - z12 * z12;
+        y11 = z22 / det; y22 = z11 / det; y12 = -z12 / det;
+    }
+    // stampe 4 noeuds [p1,p2,s1,s2] en admittances deux a deux
+    void stamp(BenchSocket *p1, BenchSocket *p2, BenchSocket *s1, BenchSocket *s2, std::vector<BenchElem> &el) const {
+        BenchSocket *nd[4] = {p1, p2, s1, s2};
+        const double B[2][4] = {{1, -1, 0, 0}, {0, 0, 1, -1}};
+        const bcplx Y[2][2] = {{y11, y12}, {y12, y22}};
+        bcplx Y4[4][4];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) {
+                bcplx s(0, 0);
+                for (int a = 0; a < 2; ++a) for (int b = 0; b < 2; ++b) s += B[a][i] * Y[a][b] * B[b][j];
+                Y4[i][j] = s;
+            }
+        for (int i = 0; i < 4; ++i)
+            for (int j = i + 1; j < 4; ++j) {
+                double ydc = -1;
+                if (i == 0 && j == 1) ydc = 1.0 / std::max(r1, 1e-3);
+                else if (i == 2 && j == 3) ydc = 1.0 / std::max(r2, 1e-3);
+                else ydc = 0.0;
+                el.push_back({nd[i], nd[j], -Y4[i][j], ydc});
+            }
+    }
+    bcplx i1(bcplx v1, bcplx v2) const { return y11 * v1 + y12 * v2; }
+    bcplx i2(bcplx v1, bcplx v2) const { return y12 * v1 + y22 * v2; }
+};
+
+class Trafo : public BenchModule {
+public:
+    explicit Trafo(bool tri)
+        : BenchModule(tri ? QStringLiteral("Transformateur triphase (3 enroulements)") : QStringLiteral("Transformateur monophase"),
+                      tri ? 560 : 300, 270, QColor(120, 128, 138)), three(tri)
+    {
+        const int n = tri ? 3 : 1;
+        const double x0 = tri ? 30 : 0, dx = tri ? 170 : 0;
+        const char *pn[3][2] = {{"U1", "U2"}, {"V1", "V2"}, {"W1", "W2"}};
+        const char *sn[3][2] = {{"u1", "u2"}, {"v1", "v2"}, {"w1", "w2"}};
+        for (int k = 0; k < n; ++k) {
+            const double cx = tri ? x0 + 70 + dx * k : w / 2.0;
+            const char *a = tri ? pn[k][0] : "U1", *b = tri ? pn[k][1] : "U2";
+            const char *c = tri ? sn[k][0] : "u1", *d = tri ? sn[k][1] : "u2";
+            p1[k] = addSocket(a, cRed, cx - 30, 55);
+            p2[k] = addSocket(b, cBlack, cx + 30, 55);
+            s1[k] = addSocket(c, cRed, cx - 30, h - 62);
+            s2[k] = addSocket(d, cBlack, cx + 30, h - 62);
+        }
+        params = { {"Puissance apparente", "VA", 50, 20000, tri ? 3000.0 : 1000.0, 50, 0},
+                   {"Tension primaire (par enroulement)", "V", 10, 1000, 230, 5, 0},
+                   {"Tension secondaire (par enroulement)", "V", 5, 1000, tri ? 230.0 : 115.0, 5, 0},
+                   {"Tension de court-circuit", "%", 1, 20, 5, 0.5, 1},
+                   {"Pertes Joule nominales", "%", 0.2, 10, 2, 0.1, 1},
+                   {"Courant a vide", "%", 0.5, 20, 3, 0.5, 1} };
+    }
+    TrafoModel model() const {
+        TrafoModel m{params[0].value / (three ? 3.0 : 1.0), params[1].value, params[2].value, params[3].value, 0, params[5].value};
+        m.ur = std::min(params[4].value, params[3].value * 0.95);
+        m.build();
+        return m;
+    }
+    void elements(std::vector<BenchElem> &el) override {
+        const TrafoModel m = model();
+        for (int k = 0; k < (three ? 3 : 1); ++k) m.stamp(p1[k], p2[k], s1[k], s2[k], el);
+    }
+    void post(const BenchSolution &sol) override {
+        const TrafoModel m = model();
+        double ip = 0, is = 0;
+        for (int k = 0; k < (three ? 3 : 1); ++k) {
+            const bcplx v1 = sol.at(p1[k]) - sol.at(p2[k]), v2 = sol.at(s1[k]) - sol.at(s2[k]);
+            ip = std::max(ip, std::abs(m.i1(v1, v2)));
+            is = std::max(is, std::abs(m.i2(v1, v2)));
+        }
+        const double sn = params[0].value / (three ? 3.0 : 1.0);
+        i1n = sn / params[1].value; i2n = sn / params[2].value;
+        i1 = ip; i2 = is;
+        warn = (ip > 1.1 * i1n || is > 1.1 * i2n) ? QStringLiteral("SURCHARGE  I1 = %1 A  I2 = %2 A").arg(fmt(ip, 1)).arg(fmt(is, 1)) : QString();
+    }
+    void paintExtra(QPainter *p) override {
+        p->setPen(QPen(QColor(235, 235, 235), 2));
+        p->setBrush(Qt::NoBrush);
+        for (int k = 0; k < (three ? 3 : 1); ++k) {
+            const double cx = (p1[k]->pos().x() + p2[k]->pos().x()) / 2;
+            for (int side = 0; side < 2; ++side) {
+                const double yc = side == 0 ? 112 : h - 112, ys = side == 0 ? 55 : h - 62;
+                p->drawLine(QPointF(cx - 30, ys), QPointF(cx - 30, yc));
+                p->drawLine(QPointF(cx + 30, ys), QPointF(cx + 30, yc));
+                QPainterPath pa; pa.moveTo(cx - 30, yc);
+                for (int i = 0; i < 6; ++i) pa.arcTo(QRectF(cx - 30 + i * 10, yc - 8, 10, 16), 180, -180);
+                p->drawPath(pa);
+            }
+            p->drawLine(QPointF(cx - 34, h / 2.0 - 6), QPointF(cx + 34, h / 2.0 - 6));
+            p->drawLine(QPointF(cx - 34, h / 2.0 + 2), QPointF(cx + 34, h / 2.0 + 2));
+        }
+        QFont f = p->font(); f.setPointSize(8); p->setFont(f);
+        p->setPen(QColor(240, 240, 240));
+        p->drawText(QRectF(6, 24, w - 12, 16),Qt::AlignCenter,
+                    QStringLiteral("%1 VA   %2 V / %3 V   ucc %4 %").arg(fmt(params[0].value, 0)).arg(fmt(params[1].value, 0))
+                        .arg(fmt(params[2].value, 0)).arg(fmt(params[3].value, 1)));
+        p->drawText(QRectF(6, h - 32, w - 12, 14), Qt::AlignCenter,
+                    QStringLiteral("I1 = %1 A (nom. %2)    I2 = %3 A (nom. %4)").arg(fmt(i1, 2)).arg(fmt(i1n, 2)).arg(fmt(i2, 2)).arg(fmt(i2n, 2)));
+    }
+    bool three;
+    BenchSocket *p1[3], *p2[3], *s1[3], *s2[3];
+    double i1 = 0, i2 = 0, i1n = 0, i2n = 0;
+};
+
 } // namespace
 
 // =====================================================================================
@@ -1039,7 +1237,9 @@ QStringList BenchWindow::kinds()
              "Lampe a incandescence", "Pince multifonction (serie)", "Oscilloscope 2 voies", "Sonde differentielle",
              "Multimetre numerique", "Alimentation continue 2 x 30 V", "Bornier de distribution",
              "Pince wattmetre 600 A (F205)", "Pince wattmetre 1000 A (F407)", "Pince wattmetre 1000 A (F27)",
-             "Pince de courant (sortie oscilloscope)" };
+             "Pince de courant (sortie oscilloscope)",
+             "Charge resistive triphasee", "Charge inductive triphasee", "Charge capacitive triphasee",
+             "Transformateur monophase", "Transformateur triphase" };
 }
 
 BenchModule *BenchWindow::addModule(const QString &kind, QPointF pos)
@@ -1064,6 +1264,11 @@ BenchModule *BenchWindow::addModule(const QString &kind, QPointF pos)
     case 14: m = new PowerClamp(1); break;
     case 15: m = new PowerClamp(2); break;
     case 16: m = new CurrentProbe; break;
+    case 17: m = new Load3(Load3::Res); break;
+    case 18: m = new Load3(Load3::Ind); break;
+    case 19: m = new Load3(Load3::Cap); break;
+    case 20: m = new Trafo(false); break;
+    case 21: m = new Trafo(true); break;
     default: return nullptr;
     }
     m->kind = i;
@@ -1119,9 +1324,9 @@ void BenchWindow::clearAll()
 
 QPointF BenchWindow::findSlot(BenchModule *m) const
 {
-    const double yMin = m->instrument ? 40 : 700, yMax = m->instrument ? 656 : 1240;
+    const double yMin = m->instrument ? 40 : 700, yMax = m->instrument ? 656 : kTableH - 10;
     for (double y = yMin; y + m->h <= yMax; y += 10)
-        for (double x = 20; x + m->w <= 1680; x += 10) {
+        for (double x = 20; x + m->w <= kTableW - 20; x += 10) {
             const QRectF r(x, y, m->w, m->h);
             bool free = true;
             for (BenchModule *o : m_modules)
@@ -1141,15 +1346,15 @@ void BenchWindow::arrange()
 
 void BenchWindow::drawTable()
 {
-    auto *wood = m_scene->addRect(0, 0, 1700, 1250, Qt::NoPen, QColor(206, 172, 128));
+    auto *wood = m_scene->addRect(0, 0, kTableW, kTableH, Qt::NoPen, QColor(206, 172, 128));
     wood->setZValue(-20);
-    auto *rail = m_scene->addRect(0, 0, 1700, 660, QPen(QColor(110, 115, 125), 3), QColor(188, 194, 204));
+    auto *rail = m_scene->addRect(0, 0, kTableW, 660, QPen(QColor(110, 115, 125), 3), QColor(188, 194, 204));
     rail->setZValue(-19);
-    auto *edge = m_scene->addRect(0, 660, 1700, 8, Qt::NoPen, QColor(120, 90, 60));
+    auto *edge = m_scene->addRect(0, 660, kTableW, 8, Qt::NoPen, QColor(120, 90, 60));
     edge->setZValue(-18);
     auto *t1 = m_scene->addSimpleText(QStringLiteral("PUPITRE ET APPAREILS DE MESURE"));
     t1->setPos(14, 8); t1->setBrush(QColor(90, 95, 105)); t1->setZValue(-17);
-    auto *t2 = m_scene->addSimpleText(QStringLiteral("PLAN DE TRAVAIL - CHARGES"));
+    auto *t2 = m_scene->addSimpleText(QStringLiteral("PLAN DE TRAVAIL - CHARGES, TRANSFORMATEURS"));
     t2->setPos(14, 672); t2->setBrush(QColor(120, 90, 60)); t2->setZValue(-17);
 }
 
@@ -1214,7 +1419,7 @@ bool BenchWindow::loadFromFile(const QString &path)
 void BenchWindow::showEvent(QShowEvent *e)
 {
     QMainWindow::showEvent(e);
-    if (!m_fitted) { m_fitted = true; m_view->fitInView(QRectF(0, 0, 1700, 1250), Qt::KeepAspectRatio); }
+    if (!m_fitted) { m_fitted = true; m_view->fitInView(QRectF(0, 0, 1900, 1250), Qt::KeepAspectRatio); }
 }
 
 bool BenchWindow::recompute()
@@ -1392,7 +1597,7 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
     setAttribute(Qt::WA_DeleteOnClose);
 
     m_scene = new BenchScene;
-    m_scene->setSceneRect(-40, -40, 1780, 1330);
+    m_scene->setSceneRect(-40, -40, kTableW + 80, kTableH + 80);
     m_scene->setBackgroundBrush(QColor(60, 62, 66));
     drawTable();
     m_view = new BenchView(m_scene);

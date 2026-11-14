@@ -152,7 +152,7 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
                                                 "triangle", "quartz", "speaker", "photodiode", "tunnel",
                                                 "lsrc", "clock", "lprobe",
                                                 "rheostat", "ldr", "cap_pol", "cap_var", "ind_fe", "ind_var",
-                                                "transformer_ip", "transformer_op", "bell", "bulb"};
+                                                "transformer_ip", "transformer_op", "transformer_iec", "bell", "bulb"};
         if (!simulated.contains(k)) continue;      // masse, étiquettes, électrotechnique
 
         if (k == "vmeter" || k == "ammeter" || k == "lprobe") {     // instruments : ne perturbent pas le circuit
@@ -240,7 +240,7 @@ inline SpiceResult buildNetlist(const QList<SymbolItem *> &symsIn, const QList<W
         }
         else if (k == "capacitor" || k == "cap_var")
             lines << QString("%1 %2 %3 %4 IC=%5").arg(name, n[0], n[1], v("C", "100n"), v("V", "0"));
-        else if (k == "transformer" || k == "transformer_ip" || k == "transformer_op") {
+        else if (k == "transformer" || k == "transformer_ip" || k == "transformer_op" || k == "transformer_iec") {
             lines << QString("L%1p %2 %3 %4").arg(name, n[0], n[1], v("Lp", "10m"));
             if (k == "transformer_op")      // secondaire inverse : le point est sur la borne du bas
                 lines << QString("L%1s %2 %3 %4").arg(name, n[3], n[2], v("Ls", "10m"));

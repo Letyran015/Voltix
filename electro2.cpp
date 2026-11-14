@@ -1,8 +1,10 @@
 #include "symbolitem.h"
 #include "catalog.h"
+#include "elib.h"
 
 #include <QFont>
 #include <QLineF>
+#include <QPainterPath>
 #include <QPolygonF>
 #include <QRegularExpression>
 #include <cmath>
@@ -37,12 +39,16 @@ void upright(QPainter *p, const QGraphicsItem *it, const QPointF &c, const QStri
 
 using DrawFn = std::function<void(QPainter *, const SymbolItem *)>;
 
+} // namespace
+void voltixDrawContact(QPainter *p, const SymbolItem *it, bool nc, int decor, bool delay, const QString &bornes);
+namespace {
+
 // ---------- Composant à deux broches verticales, dessin fourni par une fonction ----------
 class V2Item : public SymbolItem
 {
 public:
     V2Item(QString kind, QString title, QString prefix, DrawFn d,
-           QRectF body = QRectF(-24, -44, 56, 88))
+           QRectF body = QRectF(-48, -44, 76, 88))
         : m_kind(std::move(kind)), m_title(std::move(title)), m_prefix(std::move(prefix)),
         m_draw(std::move(d)), m_body(body) {}
     QString prefix() const override { return m_prefix; }
@@ -59,29 +65,13 @@ private:
     QRectF m_body;
 };
 
-// contacts : decor 0 aucun, 1 galet (fin de course), 2 niveau, 3 pression, 4 température
+// contacts : decor 0 aucun, 1 galet (fin de course), 2 niveau, 3 pression, 4 température, 7 arrêt d'urgence, 8 sélecteur
 void drawContact(QPainter *p, const SymbolItem *it, bool nc, int decor, bool delay)
 {
-    p->drawLine(QPointF(0, 40), QPointF(0, 12));
-    p->drawLine(QPointF(0, -40), QPointF(0, -12));
-    if (nc) {
-        p->drawLine(QPointF(0, 12), QPointF(-12, -12));
-        p->drawLine(QPointF(0, -12), QPointF(-12, -12));
-    } else {
-        p->drawLine(QPointF(0, 12), QPointF(-12, -8));
-    }
-    if (delay)
-        p->drawArc(QRectF(-24, -6, 10, 10), 180 * 16, 180 * 16);
-    if (decor == 1) {
-        dashed(p, QLineF(-6, 0, 14, 0));
-        p->drawEllipse(QPointF(18, 0), 4, 4);
-    } else if (decor >= 2) {
-        dashed(p, QLineF(-6, 0, 10, 0));
-        p->drawRect(QRectF(10, -8, 16, 16));
-        const QString lab = decor == 2 ? QString("N") : decor == 3 ? QString("p")
-                                                                   : QString::fromUtf8("\xCE\xB8");
-        upright(p, it, QPointF(18, 0), lab, 10);
-    }
+    QString b;
+    for (const Prop &pr : it->props)
+        if (pr.name == "Bornes") b = pr.value;
+    voltixDrawContact(p, it, nc, decor, delay, b);
 }
 
 // ---------- Appareils à n pôles ----------
@@ -131,7 +121,7 @@ protected:
     QRectF bodyRect() const override
     {
         const qreal w = (m_n - 1) * 40;
-        return QRectF(-w / 2 - 14, -44, w + 28, 88);
+        return QRectF(-w / 2 - 46, -44, w + 76, 88);
     }
     void drawBody(QPainter *p) const override
     {
@@ -142,6 +132,11 @@ protected:
 
         for (int k = 0; k < m_n; ++k) {
             const qreal x = (k - (m_n - 1) / 2.0) * 40;
+            // repères normalisés des bornes : 1/L1 en haut, 2/T1 en bas
+            if (m_type != "surge") {
+                upright(p, this, QPointF(x + 14, -36), QString("%1/L%2").arg(2 * k + 1).arg(k + 1), 7);
+                upright(p, this, QPointF(x + 14, 36), QString("%1/T%2").arg(2 * k + 2).arg(k + 1), 7);
+            }
             if (m_type == "fuseholder") {
                 p->drawLine(QPointF(x, -40), QPointF(x, -16));
                 p->drawLine(QPointF(x, 16), QPointF(x, 40));
@@ -160,8 +155,46 @@ protected:
                 continue;
             }
 
+            if (brk) {
+                // contact : croix sur la borne du haut, lame articulée en bas
+                p->drawLine(QPointF(x, -40), QPointF(x, -14));
+                p->drawLine(QPointF(x - 3, -17), QPointF(x + 3, -11));
+                p->drawLine(QPointF(x - 3, -11), QPointF(x + 3, -17));
+                p->drawLine(QPointF(x - 9, -13), QPointF(x, 6));
+                if (m_type == "mpcb") {
+                    // déclencheur moteur : un bloc « I> » par pôle
+                    p->drawLine(QPointF(x, 6), QPointF(x, 8));
+                    p->drawRect(QRectF(x - 20, 8, 40, 24));
+                    p->save();
+                    QFont f = p->font();
+                    f.setPixelSize(11);
+                    f.setItalic(true);
+                    p->setFont(f);
+                    p->drawText(QRectF(x - 20, 8, 40, 24), Qt::AlignCenter, "I>");
+                    p->restore();
+                    p->drawLine(QPointF(x, 32), QPointF(x, 40));
+                } else {
+                    // déclencheur thermique (équerre) puis magnétique (demi-cercle)
+                    const qreal y0 = diff ? 14 : 8;
+                    QPainterPath el;
+                    el.moveTo(x, 6);
+                    el.lineTo(x, y0);
+                    el.lineTo(x + 8, y0);
+                    el.lineTo(x + 8, y0 + 9);
+                    el.lineTo(x, y0 + 9);
+                    el.lineTo(x, y0 + 12);
+                    el.arcTo(QRectF(x - 5, y0 + 12, 10, 10), 90, -180);
+                    el.lineTo(x, 40);
+                    p->save();
+                    p->setBrush(Qt::NoBrush);
+                    p->drawPath(el);
+                    p->restore();
+                }
+                continue;
+            }
+
             p->drawLine(QPointF(x, -40), QPointF(x, -12));
-            if (brk || fuse) {                                   // élément thermique / fusible
+            if (fuse) {                                          // fusible du sectionneur
                 p->drawLine(QPointF(x, 40), QPointF(x, 32));
                 p->drawRect(QRectF(x - 4, 18, 8, 14));
                 p->drawLine(QPointF(x, 18), QPointF(x, 12));
@@ -170,21 +203,42 @@ protected:
             }
             p->drawLine(QPointF(x, 12), QPointF(x - 10, -10));   // lame ouverte
 
-            if (brk) {                                           // croix du disjoncteur
-                p->drawLine(QPointF(x - 14, -14), QPointF(x - 6, -6));
-                p->drawLine(QPointF(x - 14, -6), QPointF(x - 6, -14));
-            }
-            if (m_type == "contactor")
-                p->drawArc(QRectF(x - 9, -3, 8, 8), 90 * 16, 180 * 16);
+            if (m_type == "contactor")                                           // demi-cercle du contacteur
+                p->drawArc(QRectF(x - 4, -16, 8, 8), 90 * 16, 180 * 16);
             if (m_type == "disc" || m_type == "swdisc" || fuse)
                 p->drawLine(QPointF(x - 6, -14), QPointF(x + 6, -14));          // barre du sectionneur
             if (m_type == "sw" || m_type == "swdisc" || m_type == "rcd" || fuse)
                 p->drawLine(QPointF(x - 13.6, -8.4), QPointF(x - 6.4, -11.6));  // trait de l'interrupteur
         }
-        if (diff)
-            p->drawRect(QRectF(-half - 9, -34, 2 * half + 18, 12));             // tore différentiel
-        if (m_n > 1 && m_type != "fuseholder" && m_type != "surge")
+        const qreal x0 = -half;
+        if (diff) {                                                             // tore différentiel
+            p->save();
+            p->setBrush(Qt::NoBrush);
+            p->drawRoundedRect(QRectF(x0 - 10, -31, 2 * half + 20, 10), 5, 5);
+            p->restore();
+        }
+        if (brk) {
+            // commande mécanique : liaison entre les lames et renvoi vers les déclencheurs
+            const qreal yb = -9;
+            dashed(p, QLineF(x0 - 5, yb, x0 - 24, yb));
+            if (m_n > 1)
+                dashed(p, QLineF(x0 - 5, yb, half - 5, yb));
+            if (m_type == "mpcb") {
+                p->drawRect(QRectF(x0 - 29, yb - 3, 5, 6));                      // poignée
+                p->drawLine(QPointF(x0 - 29, yb + 3), QPointF(x0 - 35, yb + 12));
+                p->drawEllipse(QPointF(x0 - 36, yb + 14), 2.5, 2.5);
+            } else {
+                const qreal yt = (diff ? 14 : 8) + 4.5;
+                dashed(p, QLineF(x0 - 24, yb, x0 - 24, yt));
+                dashed(p, QLineF(x0 - 24, yt, x0 - 1, yt));
+                if (diff) {
+                    dashed(p, QLineF(x0 - 24, yb, x0 - 24, -26));
+                    dashed(p, QLineF(x0 - 24, -26, x0 - 10, -26));
+                }
+            }
+        } else if (m_n > 1 && m_type != "fuseholder" && m_type != "surge") {
             dashed(p, QLineF(-half - 5, 1, half - 5, 1));                       // liaison mécanique
+        }
     }
 private:
     QString m_type, m_title, m_prefix;
@@ -240,8 +294,21 @@ protected:
         p->drawLine(QPointF(20, 20), QPointF(20, 40));
         p->drawRect(QRectF(-40, -20, 80, 40));
         p->drawLine(QPointF(-40, 20), QPointF(40, -20));
-        upright(p, this, QPointF(-24, -9), "AC", 10);
-        upright(p, this, QPointF(24, 9), "DC", 10);
+        // « ~ » en haut à gauche, « = » en bas à droite
+        QPainterPath w;
+        w.moveTo(-34, -9);
+        w.cubicTo(-30, -16, -26, -16, -22, -9);
+        w.cubicTo(-18, -2, -14, -2, -10, -9);
+        p->save();
+        p->setBrush(Qt::NoBrush);
+        p->drawPath(w);
+        p->restore();
+        p->drawLine(QPointF(18, 6), QPointF(34, 6));
+        p->drawLine(QPointF(18, 11), QPointF(34, 11));
+        upright(p, this, QPointF(-28, -32), "L", 8);
+        upright(p, this, QPointF(28, -32), "N", 8);
+        upright(p, this, QPointF(-28, 32), "+", 9);
+        upright(p, this, QPointF(28, 32), "-", 9);
     }
 };
 
@@ -297,6 +364,7 @@ protected:
     void drawBody(QPainter *p) const override
     {
         p->drawEllipse(QPointF(0, 0), 40, 40);
+        p->drawEllipse(QPointF(0, 0), 35, 35);                      // double anneau (carcasse)
         const qreal y = -std::sqrt(1600.0 - 400.0);
         p->drawLine(QPointF(-20, -60), QPointF(-20, y));
         p->drawLine(QPointF(20, -60), QPointF(20, y));
@@ -374,12 +442,18 @@ protected:
         const int start = props[2].value.trimmed().toInt();
         for (int k = 0; k < count(); ++k) {
             const qreal x = k * 40;
-            p->drawLine(QPointF(x, -40), QPointF(x, -16));
-            p->drawLine(QPointF(x, 16), QPointF(x, 40));
-            p->drawRect(QRectF(x - 16, -16, 32, 32));
-            p->drawEllipse(QPointF(x, -10), 3, 3);
-            p->drawEllipse(QPointF(x, 10), 3, 3);
-            upright(p, this, QPointF(x, 0), QString("%1.%2").arg(props[0].value).arg(start + k), 8);
+            p->drawLine(QPointF(x, -40), QPointF(x, -6));
+            p->drawLine(QPointF(x, 6), QPointF(x, 40));
+            p->drawEllipse(QPointF(x, 0), 6, 6);                    // borne : cercle barré
+            p->drawLine(QPointF(x - 8, -8), QPointF(x + 8, 8));
+            p->save();
+            QFont f = p->font();
+            f.setPixelSize(9);
+            f.setBold(true);
+            p->setFont(f);
+            p->drawText(QRectF(x + 5, -26, 34, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                        QString("%1.%2").arg(props[0].value).arg(start + k));
+            p->restore();
         }
     }
 };
@@ -479,6 +553,9 @@ SymbolItem *makeElectroSymbol2(const QString &k)
             return new PoleDevice(*t, n);
     }
 
+    if (SymbolItem *ls = makeLibSymbol(k))
+        return ls;
+
     if (k == "earth")  return new EarthItem;
     if (k == "psu")    return new PsuItem;
     if (k == "contact_co") return new ChangeoverItem;
@@ -496,6 +573,8 @@ SymbolItem *makeElectroSymbol2(const QString &k)
             drawContact(p, it, nc, decor, delay);
         });
         s->props = pr;
+        for (Prop &q : s->props)
+            if (q.name == "Bornes") q.show = false;
         s->showRef = showRef;
         return s;
     };
@@ -517,14 +596,14 @@ SymbolItem *makeElectroSymbol2(const QString &k)
 
     if (k == "timer_coil") {
         auto *s = new V2Item(k, "Relais temporisé (bobine)", "KT", [](QPainter *p, const SymbolItem *it) {
-            p->drawLine(QPointF(0, -40), QPointF(0, -20));
-            p->drawLine(QPointF(0, 20), QPointF(0, 40));
-            p->drawRect(QRectF(-14, -20, 28, 40));
-            p->drawPolygon(QPolygonF({QPointF(-6, -9), QPointF(6, -9), QPointF(0, 0)}));
-            p->drawPolygon(QPolygonF({QPointF(-6, 9), QPointF(6, 9), QPointF(0, 0)}));
-            upright(p, it, QPointF(-1, -31), "A1", 9);
-            upright(p, it, QPointF(-1, 31), "A2", 9);
-        }, QRectF(-18, -44, 36, 88));
+            p->drawLine(QPointF(0, -40), QPointF(0, -12));
+            p->drawLine(QPointF(0, 12), QPointF(0, 40));
+            p->drawRect(QRectF(-24, -12, 48, 24));
+            p->drawPolygon(QPolygonF({QPointF(-18, -7), QPointF(-8, -7), QPointF(-13, 0)}));
+            p->drawPolygon(QPolygonF({QPointF(-18, 7), QPointF(-8, 7), QPointF(-13, 0)}));
+            upright(p, it, QPointF(10, -30), "A1", 8);
+            upright(p, it, QPointF(10, 30), "A2", 8);
+        }, QRectF(-26, -44, 62, 88));
         s->props = {{"U", "24", "V", "Tension de la bobine", true},
                     {"Tempo", "5", "s", "Temporisation", true},
                     {"Type", "travail", "", "À l'appel (travail) ou à la chute (repos)", false}};
@@ -553,23 +632,16 @@ SymbolItem *makeElectroSymbol2(const QString &k)
     }
     if (k == "estop") {
         auto *s = new V2Item(k, "Arrêt d'urgence", "S", [](QPainter *p, const SymbolItem *it) {
-            drawContact(p, it, true, 0, false);
-            dashed(p, QLineF(-6, 0, 12, 0));
-            p->save();
-            p->setBrush(QColor(200, 0, 0));
-            p->drawEllipse(QPointF(18, 0), 6, 6);
-            p->restore();
+            drawContact(p, it, true, 7, false);
         });
-        s->props = {{"Bornes", "11-12", "", "Repères des bornes", true}};
+        s->props = {{"Bornes", "11-12", "", "Repères des bornes", false}};
         return s;
     }
     if (k == "selector") {
         auto *s = new V2Item(k, "Commutateur à clé / sélecteur", "S", [](QPainter *p, const SymbolItem *it) {
-            drawContact(p, it, false, 0, false);
-            dashed(p, QLineF(-6, 0, 12, 0));
-            p->drawEllipse(QPointF(16, 0), 4, 4);
+            drawContact(p, it, false, 8, false);
         });
-        s->props = {{"Bornes", "13-14", "", "Repères des bornes", true}};
+        s->props = {{"Bornes", "13-14", "", "Repères des bornes", false}};
         return s;
     }
     if (k == "buzzer") {

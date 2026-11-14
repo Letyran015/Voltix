@@ -98,15 +98,6 @@ protected:
         p.drawPolygon(QPolygonF({QPointF(W, H * 0.10), QPointF(W * 0.93, H * 0.17), QPointF(W, H * 0.13)}));
         p.drawPolygon(QPolygonF({QPointF(0, H), QPointF(W * 0.08, H * 0.84), QPointF(W * 0.10, H)}));
 
-        // slogan
-        QFont tag = font();
-        tag.setBold(true);
-        tag.setPixelSize(16);
-        tag.setLetterSpacing(QFont::AbsoluteSpacing, 2);
-        p.setFont(tag);
-        p.setPen(QColor(255, 255, 255, 220));
-        p.drawText(QRectF(0, 16, W, 30), Qt::AlignCenter, "VOS CIRCUITS. VOS PROJETS. VOS RÈGLES.");
-
         for (int i = 0; i < 3; ++i)
             paintCard(p, i);
 
