@@ -6,3 +6,5 @@ ngspice - simulateur de circuits (https://ngspice.sourceforge.io)
 Qt - bibliothèque d'interface (https://www.qt.io)
   Licence LGPL v3, liaison dynamique (DLL / bibliothèques partagées).
   Le code source de Qt est disponible sur https://download.qt.io
+
+Voltix : licence MIT (voir LICENSE a la racine du depot).
