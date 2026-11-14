@@ -50,3 +50,5 @@ Root: HKA; Subkey: "Software\Classes\Voltix.Schema\shell\open\command"; ValueTyp
 
 [Run]
 Filename: "{app}\bin\Voltix.exe"; Description: "Lancer Voltix"; Flags: nowait postinstall skipifsilent
+; mise a jour automatique (installation silencieuse lancee par Voltix) : on relance Voltix a la fin
+Filename: "{app}\bin\Voltix.exe"; Flags: nowait skipifnotsilent runasoriginaluser

@@ -48,16 +48,31 @@ inline const QList<CatalogEntry> &catalog()
 {
     static const QList<CatalogEntry> c = [] {
         QList<CatalogEntry> v = {
-                                  {"resistor",    "Résistance",        "Composants passifs", ModAll},
-                                  {"capacitor",   "Condensateur",      "Composants passifs", ModAll},
-                                  {"inductor",    "Inductance",        "Composants passifs", ModAll},
-                                  {"transformer", "Transformateur",    "Composants passifs", ModAll},
 
-                                  {"vsource", "Source DC",         "Sources et repères", ModAll},
+                                  {"resistor",    "Résistance",        "Composants passifs", ModAll},
+                                  {"rheostat", "Résistance variable (rhéostat)", "Composants passifs", ModAll},
+                                  {"pot",     "Potentiomètre",              "Composants passifs", ModAll},
+                                  {"ntc",     "Thermistance CTN",           "Composants passifs", ModAll},
+                                  {"ldr",      "Photorésistance (LDR)",          "Composants passifs", ModAll},
+                                  {"inductor",    "Inductance",        "Composants passifs", ModAll},
+                                  {"ind_fe",   "Inductance à noyau de fer",      "Composants passifs", ModAll},
+                                  {"ind_var",  "Inductance variable",            "Composants passifs", ModAll},
+                                  {"transformer", "Transformateur",    "Composants passifs", ModAll},
+                                  {"transformer_ip", "Transformateur (secondaire en phase)",          "Composants passifs", ModAll},
+                                  {"transformer_op", "Transformateur (secondaire en opposition de phase)", "Composants passifs", ModAll},
+                                  {"capacitor",   "Condensateur",      "Composants passifs", ModAll},
+                                  {"cap_pol",  "Condensateur polarisé",          "Composants passifs", ModAll},
+                                  {"cap_var",  "Condensateur variable",          "Composants passifs", ModAll},
+                                  {"quartz",  "Quartz",       "Composants passifs", ModElectronics},
+                                  {"speaker", "Haut-parleur", "Composants passifs", ModAll},
+                                  {"bell",     "Sonnerie",                       "Composants passifs", ModAll},
+                                  {"bulb",     "Lampe",                          "Composants passifs", ModAll},
+
+                                  {"vsource", "Source de tension DC", "Sources et repères", ModAll},
                                   {"vsin",    "Source sinus",      "Sources et repères", ModAll},
                                   {"vpulse",  "Source impulsion",  "Sources et repères", ModElectronics | ModElectromag},
+                                  {"triangle", "Source triangle",  "Sources et repères", ModAll},
                                   {"ground",  "Masse",             "Sources et repères", ModAll},
-                                  {"label",   "Étiquette de nœud", "Sources et repères", ModAll},
 
                                   {"vmeter",  "Voltmètre",         "Mesure", ModAll},
                                   {"ammeter", "Ampèremètre",       "Mesure", ModAll},
@@ -66,6 +81,43 @@ inline const QList<CatalogEntry> &catalog()
                                   {"npn",   "Transistor NPN", "Semi-conducteurs", ModElectronics},
                                   {"pnp",   "Transistor PNP", "Semi-conducteurs", ModElectronics},
                                   {"opamp", "Ampli-op",       "Semi-conducteurs", ModElectronics},
+                                  {"zener",    "Diode Zener",     "Semi-conducteurs", ModElectronics},
+                                  {"led",      "LED",             "Semi-conducteurs", ModElectronics},
+                                  {"schottky", "Diode Schottky",  "Semi-conducteurs", ModElectronics},
+                                  {"nmos",     "MOSFET canal N",  "Semi-conducteurs", ModElectronics},
+                                  {"pmos",     "MOSFET canal P",  "Semi-conducteurs", ModElectronics},
+                                  {"njfet",    "JFET canal N",    "Semi-conducteurs", ModElectronics},
+                                  {"pjfet",    "JFET canal P",    "Semi-conducteurs", ModElectronics},
+                                  {"thyristor","Thyristor",       "Semi-conducteurs", ModAll},
+                                  {"triac",    "Triac",           "Semi-conducteurs", ModAll},
+                                  {"diac",     "Diac",            "Semi-conducteurs", ModAll},
+                                  {"bridge",   "Pont redresseur", "Semi-conducteurs", ModAll},
+                                  {"photodiode","Photodiode",     "Semi-conducteurs", ModElectronics},
+                                  {"tunnel",   "Diode tunnel",    "Semi-conducteurs", ModElectronics},
+
+
+                                  {"lsrc",   "Entrée logique (0/1)", "Entrées / sorties logiques", ModElectronics},
+                                  {"clock",  "Horloge",              "Entrées / sorties logiques", ModElectronics},
+                                  {"lprobe", "Sonde logique",        "Entrées / sorties logiques", ModElectronics},
+
+
+
+                                  {"summer",     "Sommateur",         "Blocs de commande", ModAll},
+                                  {"gain",       "Gain",              "Blocs de commande", ModAll},
+                                  {"comparator", "Comparateur",       "Blocs de commande", ModAll},
+                                  {"vswitch",    "Interrupteur commandé", "Blocs de commande", ModAll},
+
+                                  {"timer555", "Temporisateur 555",   "Circuits intégrés", ModElectronics},
+                                  {"tl431",    "TL431",               "Circuits intégrés", ModElectronics},
+                                  {"opto",     "Optocoupleur",        "Circuits intégrés", ModElectronics},
+
+                                  {"igbt",     "IGBT (interrupteur commandé)", "Semi-conducteurs", ModAll},
+
+                                  {"isource", "Source de courant DC",       "Sources et repères", ModAll},
+                                  {"vcvs",    "Source tension / tension",   "Sources commandées", ModElectronics},
+                                  {"vccs",    "Source courant / tension",   "Sources commandées", ModElectronics},
+                                  {"cccs",    "Source courant / courant",   "Sources commandées", ModElectronics},
+                                  {"ccvs",    "Source tension / courant",   "Sources commandées", ModElectronics},
 
                                   {"grid3", "Réseau triphasé",            "Alimentation et terre", ModElectrotech},
                                   {"earth", "Terre (PE)",                 "Alimentation et terre", ModElectrotech},
