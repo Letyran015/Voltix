@@ -8,6 +8,8 @@
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QDialog>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QFormLayout>
 #include <QVBoxLayout>
 #include <QSet>
@@ -31,6 +33,7 @@
 #include <QGraphicsSimpleTextItem>
 #include <QtMath>
 #include <algorithm>
+#include <deque>
 
 static const double PI2 = 6.283185307179586;
 // Banc vu de face : le pupitre (console + table + caisson des molettes) est au centre ;
@@ -209,6 +212,17 @@ void BenchModule::mouseDoubleClickEvent(QGraphicsSceneMouseEvent *)
     QDialog d;
     d.setWindowTitle(plate.isEmpty() ? title : QStringLiteral("Plaque signaletique - ") + title);
     auto *lay = new QVBoxLayout(&d);
+    QPixmap pm = platePixmap();
+    if (!pm.isNull()) {                                 // dessin des plaques et des couplages
+        if (const QScreen *sc = QGuiApplication::primaryScreen()) {       // petit ecran : on reduit le dessin
+            const int avail = sc->availableGeometry().height() - 300;
+            if (avail > 200 && pm.height() > avail) pm = pm.scaledToHeight(avail, Qt::SmoothTransformation);
+        }
+        auto *pic = new QLabel;
+        pic->setPixmap(pm);
+        pic->setAlignment(Qt::AlignCenter);
+        lay->addWidget(pic);
+    }
     if (!plate.isEmpty()) {                             // plaque signaletique, couplages
         auto *lab = new QLabel(plate);
         lab->setTextFormat(Qt::RichText);
@@ -1251,33 +1265,122 @@ public:
 };
 
 // ---- Courant dans un fil (pour les pinces a machoire) ------------------------------------------------------
-// Courant qui traverse le fil w, compte de a vers b (puis inverse si b est le pupitre : sens source -> charge).
-// Il est deduit de la douille d'une extremite qui n'a qu'un seul fil et appartient a un appareil sans liaison interne.
+// Les fils et les liaisons internes sont des conducteurs parfaits. On reconstruit le paquet de douilles relie par
+// des fils autour de w ; le calcul donne le courant que chaque douille envoie dans son appareil (iin). On repartit
+// ces courants dans les fils en donnant a chaque cordon la meme petite resistance : pour un cablage sans boucle
+// c'est exactement la loi des noeuds, et dans une boucle de cordons le courant se partage entre eux comme en vrai.
+// Resultat compte de a vers b. Faux seulement si le fil double une liaison interne (courant indetermine).
 bool wireCurrent(const BenchSolution &s, const BenchWire *w, bcplx &I, double &Idc)
 {
-    // Loi des noeuds : on retire le fil w, puis on parcourt tout ce qui reste relie a son extremite « a »
-    // (autres fils, liaisons internes des appareils). Le courant du fil est la somme des courants qui
-    // entrent dans les appareils de ce cote. Si l'on retombe sur l'extremite « b », le fil fait partie
-    // d'une boucle de fils : son courant est indetermine.
-    QSet<BenchSocket *> seen;
-    std::vector<BenchSocket *> todo{w->a};
-    seen.insert(w->a);
-    QHash<BenchModule *, std::vector<std::pair<BenchSocket *, BenchSocket *>>> linkCache;
+    QHash<BenchSocket *, std::vector<BenchSocket *>> lk;                 // liaisons internes, par douille
+    for (const auto &pr : s.links) { lk[pr.first].push_back(pr.second); lk[pr.second].push_back(pr.first); }
+    // 1) paquet de douilles au meme potentiel que le fil
+    QHash<BenchSocket *, int> node;                                       // douille -> noeud (fusion par liaison interne)
+    std::vector<BenchSocket *> order, todo{w->a};
+    QSet<BenchSocket *> seen{w->a};
+    QSet<const BenchWire *> wires;
     while (!todo.empty()) {
         BenchSocket *x = todo.back(); todo.pop_back();
+        order.push_back(x);
         auto push = [&](BenchSocket *y) { if (!seen.contains(y)) { seen.insert(y); todo.push_back(y); } };
-        for (BenchWire *o : x->wires) if (o != w) push(o->a == x ? o->b : o->a);
-        if (x->module->hasLinks()) {
-            if (!linkCache.contains(x->module)) x->module->links(linkCache[x->module]);
-            for (const auto &pr : linkCache[x->module]) { if (pr.first == x) push(pr.second); if (pr.second == x) push(pr.first); }
+        for (BenchWire *o : x->wires) { wires.insert(o); push(o->a == x ? o->b : o->a); }
+        for (BenchSocket *y : lk.value(x)) push(y);
+    }
+    // 2) noeuds = douilles fusionnees par les liaisons internes
+    int n = 0;
+    for (BenchSocket *x : order) {
+        if (node.contains(x)) continue;
+        std::vector<BenchSocket *> st{x};
+        node[x] = n;
+        while (!st.empty()) {
+            BenchSocket *y = st.back(); st.pop_back();
+            for (BenchSocket *z : lk.value(y)) if (!node.contains(z)) { node[z] = n; st.push_back(z); }
+        }
+        ++n;
+    }
+    const int na = node.value(w->a, -1), nb = node.value(w->b, -1);
+    if (na < 0 || nb < 0 || na == nb) return false;
+    // 3) reseau de cordons : laplacien reel, second membre = courant rendu par les appareils a chaque noeud
+    std::vector<double> A((size_t)n * n, 0.0);
+    std::vector<bcplx> J(n, bcplx(0, 0));
+    std::vector<double> Jd(n, 0.0);
+    auto at = [&](int r, int c) -> double & { return A[(size_t)r * n + c]; };
+    for (const BenchWire *o : wires) {
+        const int i = node.value(o->a), j = node.value(o->b);
+        if (i == j) continue;
+        at(i, i) += 1; at(j, j) += 1; at(i, j) -= 1; at(j, i) -= 1;
+    }
+    for (BenchSocket *x : order) { J[node[x]] -= s.iinAt(x); Jd[node[x]] -= s.iinDcAt(x); }
+    // noeud 0 pris comme reference, elimination de Gauss sur les n-1 autres
+    for (int c = 1; c < n; ++c) {
+        int piv = c;
+        for (int r = c + 1; r < n; ++r) if (std::abs(at(r, c)) > std::abs(at(piv, c))) piv = r;
+        if (std::abs(at(piv, c)) < 1e-12) return false;
+        if (piv != c) { for (int k = 1; k < n; ++k) std::swap(at(c, k), at(piv, k)); std::swap(J[c], J[piv]); std::swap(Jd[c], Jd[piv]); }
+        for (int r = c + 1; r < n; ++r) {
+            const double f = at(r, c) / at(c, c);
+            if (f == 0.0) continue;
+            for (int k = c; k < n; ++k) at(r, k) -= f * at(c, k);
+            J[r] -= f * J[c]; Jd[r] -= f * Jd[c];
         }
     }
-    if (seen.contains(w->b)) return false;
-    bcplx sum(0, 0); double sumDc = 0;
-    for (BenchSocket *x : seen) { sum += s.iinAt(x); sumDc += s.iinDcAt(x); }
-    I = -sum; Idc = -sumDc;                              // compte de a vers b
-    if (w->b->module->isSupply() && !w->a->module->isSupply()) { I = -I; Idc = -Idc; }
+    std::vector<bcplx> ph(n, bcplx(0, 0));
+    std::vector<double> pd(n, 0.0);
+    for (int r = n - 1; r >= 1; --r) {
+        bcplx v = J[r]; double d = Jd[r];
+        for (int k = r + 1; k < n; ++k) { v -= at(r, k) * ph[k]; d -= at(r, k) * pd[k]; }
+        ph[r] = v / at(r, r); pd[r] = d / at(r, r);
+    }
+    I = ph[na] - ph[nb];
+    Idc = pd[na] - pd[nb];
     return true;
+}
+
+// Sens « source -> charge » du fil w : +1 si l'extremite a est du cote de la source, -1 si c'est b.
+// On compte le nombre d'appareils a traverser pour rejoindre une borne de source depuis chaque extremite
+// (les fils ne comptent pas, les voltmetres ne conduisent pas) ; a egalite, on regarde le sens de la puissance.
+int wireSense(const BenchSolution &s, const BenchWire *w, bcplx I, double Idc)
+{
+    const int N = (int)s.all.size();
+    if (w->a->idx < 0 || w->b->idx < 0 || w->a->idx >= N || w->b->idx >= N) return 1;
+    std::vector<std::vector<std::pair<int, int>>> adj(N);
+    auto edge = [&](BenchSocket *x, BenchSocket *y, int cost) {
+        if (x->idx < 0 || y->idx < 0 || x->idx >= N || y->idx >= N) return;
+        adj[x->idx].push_back({y->idx, cost}); adj[y->idx].push_back({x->idx, cost});
+    };
+    for (BenchSocket *x : s.all)
+        for (BenchWire *o : x->wires) if (o != w && o->a == x) edge(o->a, o->b, 0);
+    for (const auto &pr : s.links) edge(pr.first, pr.second, 0);
+    for (const BenchElem &e : s.el) {
+        const double g = std::max(std::abs(e.y), e.ydc >= 0 ? e.ydc : 0.0);
+        if (g >= 1e-4) edge(e.a, e.b, 1);
+    }
+    std::vector<char> isSrc(N, 0);
+    for (const BenchSrc &q : s.src) {
+        if (q.p->idx >= 0 && q.p->idx < N) isSrc[q.p->idx] = 1;
+        if (q.n->idx >= 0 && q.n->idx < N) isSrc[q.n->idx] = 1;
+    }
+    auto dist = [&](int start) {
+        std::vector<int> d(N, 1 << 28);
+        std::deque<int> q{start};
+        d[start] = 0;
+        while (!q.empty()) {
+            const int x = q.front(); q.pop_front();
+            if (isSrc[x]) return d[x];
+            for (const auto &e : adj[x])
+                if (d[x] + e.second < d[e.first]) {
+                    d[e.first] = d[x] + e.second;
+                    if (e.second == 0) q.push_front(e.first); else q.push_back(e.first);
+                }
+        }
+        return 1 << 28;
+    };
+    const int da = dist(w->a->idx), db = dist(w->b->idx);
+    if (da != db) return da < db ? 1 : -1;
+    const double P = (s.at(w->a) * std::conj(I)).real() + s.dcAt(w->a) * Idc;
+    const double S = std::abs(s.at(w->a)) * std::abs(I) + std::abs(s.dcAt(w->a) * Idc);
+    if (S > 1e-9 && std::abs(P) > 1e-3 * S) return P > 0 ? 1 : -1;
+    return 1;
 }
 
 // ---- Base des pinces : anneau cliquable + fil pince -----------------------------------------------------------
@@ -1312,10 +1415,24 @@ public:
     int current(const BenchSolution &s, bcplx &I, double &Idc) const {
         if (!wire) return 0;
         if (!wireCurrent(s, wire, I, Idc)) return 2;
+        if (wireSense(s, wire, I, Idc) < 0) { I = -I; Idc = -Idc; }      // fleche de la pince : de la source vers la charge
         if (flip() > 0.5) { I = -I; Idc = -Idc; }
         return 1;
     }
-    virtual double flip() const { return 0; }
+    double flip() const { return (flipIdx >= 0 && flipIdx < (int)params.size()) ? params[flipIdx].value : 0; }
+    int flipIdx = -1;                                   // rang du reglage « sens de la pince »
+protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && flipIdx >= 0 && triggerPath().contains(e->pos())) {   // gachette : retourner la pince
+            params[flipIdx].value = params[flipIdx].value > 0.5 ? 0 : 1;
+            update();
+            if (changed) changed();
+            e->accept();
+            return;
+        }
+        BenchModule::mousePressEvent(e);
+    }
+public:
     // ---- dessin commun des pinces : machoire rouge effilee, collerette, corps sombre, gachette ----
     static QPainterPath holePath() {
         QPainterPath h;
@@ -1378,11 +1495,66 @@ public:
                    {"Maintien de l'affichage (HOLD)", "", 0, 1, 0, 1, 0},
                    {"Sens de la pince (0 normal, 1 inverse)", "", 0, 1, 0, 1, 0},
                    {"Afficher la frequence (Hz)", "", 0, 1, 0, 1, 0} };
+        params.push_back({"Triphase equilibre 3F (0 = monophase, 1 = total triphase)", "", 0, 1, 0, 1, 0});
         wheelParam = 0;
+        flipIdx = 3;
+        setAcceptHoverEvents(true);
     }
-    double flip() const override { return params[3].value; }
     int fn() const { return int(params[0].value + 0.5); }
+    bool tri3() const { return model_ != 2 && params[5].value > 0.5; }
+    // ---- touches cliquables ----
+    enum Key { KNone, KHold, KTri, KHz, KQty, KFn, KFlip };
+    Key keyAt(QPointF p) const {
+        if (triggerPath().contains(p)) return KFlip;
+        if (model_ != 2) {
+            if (QRectF(42, 322, 48, 24).contains(p)) return KHold;
+            if (QRectF(104, 322, 48, 24).contains(p)) return KTri;
+            if (QRectF(104, 356, 48, 24).contains(p)) return KHz;
+            if (QRectF(44, 394, 162, 106).contains(p)) return KQty;
+            if (QLineF(p, QPointF(150, 232)).length() <= 42) return KFn;
+        } else {
+            if (QRectF(172, 178, 44, 18).contains(p)) return KHold;
+            if (QRectF(82, 530, 38, 18).contains(p)) return KHz;
+            if (QRectF(44, 336, 162, 140).contains(p)) return KQty;
+            if (QLineF(p, QPointF(135, 244)).length() <= 42) return KFn;
+        }
+        return KNone;
+    }
+protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent *e) override {
+        const Key k = e->button() == Qt::LeftButton ? keyAt(e->pos()) : KNone;
+        if (k == KNone || k == KFlip) { ClampBase::mousePressEvent(e); return; }
+        auto toggle = [this](int i) { params[i].value = params[i].value > 0.5 ? 0 : 1; };
+        if (k == KHold) toggle(2);
+        else if (k == KTri) toggle(5);
+        else if (k == KHz) toggle(4);
+        else if (k == KQty) params[1].value = (int(params[1].value + 0.5) + 1) % 4;
+        else if (k == KFn) params[0].value = (fn() + 1) % 5;
+        update();
+        if (changed) changed();
+        e->accept();
+    }
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *e) override {
+        if (keyAt(e->pos()) != KNone) { mousePressEvent(e); return; }
+        BenchModule::mouseDoubleClickEvent(e);
+    }
+    void hoverMoveEvent(QGraphicsSceneHoverEvent *e) override {
+        static const char *tips[] = {
+            "Double-clic : reglages. Molette de la souris : fonction (OFF, V, A, W, ohm).",
+            "HOLD : fige l'affichage.",
+            "1F / 3F : puissance monophasee, ou puissance totale d'un triphase equilibre "
+            "(cordon rouge sur L1, noir sur L2, pince sur L3).",
+            "Hz : affiche la frequence.",
+            "Afficheur : cliquer pour passer de W a VA, var puis PF (fonction W).",
+            "Commutateur : cliquer (ou molette) pour changer de fonction.",
+            "Gachette : retourner la pince (la fleche va de la source vers la charge par defaut)." };
+        const Key k = keyAt(e->pos());
+        setToolTip(QString::fromLatin1(tips[k]));
+        setCursor(k == KNone ? Qt::ArrowCursor : Qt::PointingHandCursor);
+    }
+public:
     static QString num(double x) {
+        if (std::abs(x) < 5e-4) x = 0;                  // pas de « -0.000 »
         const double a = std::abs(x);
         return fmt(x, a < 10 ? 3 : (a < 100 ? 2 : (a < 1000 ? 1 : 0)));
     }
@@ -1393,7 +1565,12 @@ public:
         const int st = current(s, iac, idc);
         const double urms = std::hypot(std::abs(uac), udc), irms = std::hypot(std::abs(iac), idc);
         const bcplx sp = uac * std::conj(iac);
-        const double P = sp.real() + udc * idc, Q = sp.imag(), S = urms * irms, PF = S > 1e-9 ? P / S : 0;
+        // 1F : P = U I cos(phi). 3F equilibre (rouge sur L1, noir sur L2, pince sur L3) : la tension simple de la
+        // phase pincee est en quadrature avec la tension composee mesuree, d'ou P = -rac(3) Im(U I*), Q = rac(3) Re(U I*).
+        const double r3 = std::sqrt(3.0);
+        const double P = tri3() ? -r3 * sp.imag() : sp.real() + udc * idc;
+        const double Q = tri3() ? r3 * sp.real() : sp.imag();
+        const double S = tri3() ? r3 * std::abs(uac) * std::abs(iac) : urms * irms, PF = S > 1e-9 ? P / S : 0;
         main_ = "---"; unit_ = ""; sub_.clear();
         const bool needI = (fn() == 2 || fn() == 3);
         if (fn() == 0) main_.clear();
@@ -1409,7 +1586,7 @@ public:
             }
         }
         else if (st == 0) sub_ = QStringLiteral("Cliquez sur l'anneau, puis sur un fil");
-        else if (st == 2) { main_ = "?"; warn = QStringLiteral("FIL AMBIGU"); sub_ = QStringLiteral("fil dans une boucle"); }
+        else if (st == 2) { main_ = "?"; warn = QStringLiteral("FIL AMBIGU"); sub_ = QStringLiteral("ce fil double une liaison interne de l'appareil"); }
         else if (fn() == 2) { main_ = num(irms); unit_ = "A"; sub_ = "TRMS AC+DC"; }
         else {
             const int g = int(params[1].value + 0.5);
@@ -1418,7 +1595,9 @@ public:
             else if (g == 2) { main_ = num(Q); unit_ = "var"; }
             else { main_ = fmt(PF, 2); unit_ = "PF"; }
             sub_ = QStringLiteral("%1 V  %2 A").arg(num(urms), num(irms));
-            if (std::abs(Q) > 0.05 * S && S > 1e-6) sub_ += Q > 0 ? "  ind" : "  cap";
+            if (std::abs(Q) > 0.05 * S && S > 1e-6) sub_ += (Q > 0) == (P > -0.02 * S) ? "  ind" : "  cap";
+            if (P < -0.02 * S && S > 1e-6)
+                sub_ += tri3() ? QStringLiteral("\nP < 0 : rouge L1, noir L2, pince L3 ?") : QStringLiteral("\nP < 0 : inverser cordons ou pince");
         }
         (void)needI;
         if (params[4].value > 0.5) sub_ = QStringLiteral("%1 Hz").arg((std::abs(uac) > 0.5 || std::abs(iac) > 1e-3) ? "50.0" : "0.0");
@@ -1439,7 +1618,12 @@ public:
         p->drawText(QRectF(r.x() + 4, r.y() + r.height() * 0.46, r.width() - 8, 18), Qt::AlignRight | Qt::AlignVCenter, unit_);
         m.setPointSize(7); m.setBold(false); p->setFont(m);
         p->drawText(QRectF(r.x() + 5, r.y() + r.height() * 0.66, r.width() - 10, r.height() * 0.32), Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap, sub_);
-        if (params[2].value > 0.5) { m.setBold(true); p->setFont(m); p->drawText(QRectF(r.x() + 5, r.y() + 3, 50, 12), Qt::AlignLeft, "HOLD"); }
+        m.setBold(true); p->setFont(m);
+        QStringList flags;
+        if (params[2].value > 0.5) flags << "HOLD";
+        if (tri3()) flags << "3F";
+        if (flip() > 0.5) flags << "INV";
+        p->drawText(QRectF(r.x() + 5, r.y() + 3, 90, 12), Qt::AlignLeft, flags.join(' '));
     }
     void knob(QPainter *p, QPointF c, const QPointF &dir, double rr) {
         p->setPen(QPen(QColor(25, 25, 28), 1.5)); p->setBrush(QColor(112, 112, 118));
@@ -1533,8 +1717,8 @@ public:
             bcplx I(0, 0); double d = 0;
             return current(s, I, d) == 1 ? d * params[0].value : 0.0;
         };
+        flipIdx = 1;
     }
-    double flip() const override { return params[1].value; }
     void paintExtra(QPainter *p) override {
         paintDeco(p, QStringLiteral("CAT III   100 A"));
         p->setPen(QColor(236, 236, 236));
@@ -1681,23 +1865,163 @@ public:
     double i1 = 0, i2 = 0, i1n = 0, i2n = 0;
 };
 
-// ---- Chariots de charges : commutateurs en facade, 6 bornes de couplage, entrees TRIPHASE / MONOPHASE --------
-// Les elements sont entre U1-U2, V1-V2, W1-W2 ; les bornes sont disposees comme une plaque a bornes
-// (U1 V1 W1 au-dessus, W2 U2 V2 en dessous) : barrette horizontale en bas = etoile, 3 barrettes verticales = triangle.
-// Entrees TRIPHASE reliees a U1 V1 W1 ; entree MONOPHASE : rouge = U1, bleu = U2.
+// =====================================================================================
+//  Plaques de couplage des chariots (dessinees comme les plaques gravees : bornes et barrettes)
+// =====================================================================================
+static const QColor kInk(238, 230, 205);          // gravure claire sur plaque noire
+static const QColor kInkOn(110, 235, 120);        // couplage realise en ce moment sur le chariot
+
+static void inkText(QPainter *p, const QRectF &r, const QString &t, double px, int flags = Qt::AlignCenter,
+                    const QColor &c = kInk, bool bold = true)
+{
+    QFont f = p->font(); f.setPixelSize(qMax(3, qRound(px))); f.setBold(bold); p->setFont(f);
+    p->setPen(c);
+    p->drawText(r, flags | Qt::TextDontClip, t);
+}
+static void plateFrame(QPainter *p, const QRectF &r)
+{
+    const double u = qMax(0.6, r.height() / 80.0);
+    p->setPen(QPen(QColor(196, 176, 116), u));
+    p->setBrush(QColor(16, 16, 18));
+    p->drawRect(r);
+    p->setPen(Qt::NoPen); p->setBrush(QColor(196, 176, 116));
+    for (const QPointF &c : {r.topLeft() + QPointF(3 * u, 3 * u), r.topRight() + QPointF(-3 * u, 3 * u),
+                             r.bottomLeft() + QPointF(3 * u, -3 * u), r.bottomRight() + QPointF(-3 * u, -3 * u)})
+        p->drawEllipse(c, 1.3 * u, 1.3 * u);
+}
+static void inkLine(QPainter *p, const QRectF &plate, QPointF a, QPointF b)
+{
+    p->setPen(QPen(kInk, qMax(0.5, plate.height() / 110.0)));
+    p->drawLine(a, b);
+}
+// bornes en grille (rows x cols) dans r ; chaque barrette entoure les bornes first..second (rang = ligne * cols + colonne)
+static void boardPicto(QPainter *p, const QRectF &r, int rows, int cols, const std::vector<std::pair<int, int>> &straps, const QColor &ink)
+{
+    const double dx = r.width() / cols, dy = r.height() / rows, rad = qMin(dx, dy) * 0.15, lw = qMax(0.5, rad * 0.45);
+    auto c = [&](int i) { return QPointF(r.left() + dx * (i % cols + 0.5), r.top() + dy * (i / cols + 0.5)); };
+    p->setBrush(Qt::NoBrush);
+    p->setPen(QPen(ink, lw));
+    for (int i = 0; i < rows * cols; ++i) p->drawEllipse(c(i), rad, rad);
+    for (const auto &s : straps) {
+        const QRectF rr = QRectF(c(s.first), c(s.second)).normalized().adjusted(-rad * 1.8, -rad * 1.8, rad * 1.8, rad * 1.8);
+        p->drawRoundedRect(rr, rad * 1.8, rad * 1.8);
+    }
+}
+// bornier 2 x 3 : 0 = etoile (rangee du haut pontee), 1 = triangle (3 barrettes verticales), 2 = mono (2 rangees pontees)
+static std::vector<std::pair<int, int>> straps3(int mode)
+{
+    if (mode == 0) return {{0, 2}};
+    if (mode == 1) return {{0, 3}, {1, 4}, {2, 5}};
+    if (mode == 2) return {{0, 2}, {3, 5}};
+    return {};
+}
+
+// Schema de cablage d'un couplage : bornier 2 x 3 avec le nom des bornes, les 3 elements internes (entre une borne
+// du bas et la borne du haut de la colonne suivante), les barrettes a poser et les arrivees.
+// kind : 0 resistance, 1 inductance, 2 condensateur
+static void wiringDiagram(QPainter *p, const QRectF &r, int mode, const QStringList &top, const QStringList &bot,
+                          const QString &title, const QString &sub, int kind, bool active)
+{
+    p->setPen(QPen(active ? QColor(40, 160, 70) : QColor(110, 110, 110), active ? 3 : 1));
+    p->setBrush(QColor(250, 250, 246));
+    p->drawRoundedRect(r, 6, 6);
+    QFont f = p->font(); f.setPixelSize(13); f.setBold(true); p->setFont(f);
+    p->setPen(QColor(20, 20, 20));
+    p->drawText(QRectF(r.left(), r.top() + 6, r.width(), 18), Qt::AlignCenter, title);
+    f.setPixelSize(11); f.setBold(false); p->setFont(f);
+    p->drawText(QRectF(r.left(), r.top() + 24, r.width(), 16), Qt::AlignCenter, sub);
+
+    const double dx = 62, x0 = r.center().x() - dx, yT = r.top() + 98, yB = yT + 62;
+    QPointF T[3], B[3];
+    for (int k = 0; k < 3; ++k) { T[k] = QPointF(x0 + dx * k, yT); B[k] = QPointF(x0 + dx * k, yB); }
+    // elements internes
+    for (int k = 0; k < 3; ++k) {
+        const QPointF a = B[k], b = T[(k + 1) % 3];
+        p->setPen(QPen(QColor(120, 120, 125), 1.2, Qt::DashLine));
+        p->drawLine(a, b);
+        p->save();
+        const QPointF m = a + (b - a) * (k == 2 ? 0.75 : 0.3);
+        p->translate(m);
+        p->rotate(qRadiansToDegrees(std::atan2(b.y() - a.y(), b.x() - a.x())));
+        p->setPen(QPen(QColor(30, 30, 30), 1.4));
+        p->setBrush(QColor(250, 250, 246));
+        if (kind == 0) p->drawRect(QRectF(-11, -4.5, 22, 9));
+        else if (kind == 2) {
+            p->setPen(Qt::NoPen); p->drawRect(QRectF(-3, -8, 6, 16));
+            p->setPen(QPen(QColor(30, 30, 30), 2));
+            p->drawLine(QPointF(-3, -8), QPointF(-3, 8)); p->drawLine(QPointF(3, -8), QPointF(3, 8));
+        } else {
+            p->setPen(Qt::NoPen); p->drawRect(QRectF(-12, -5, 24, 6));
+            p->setPen(QPen(QColor(30, 30, 30), 1.6)); p->setBrush(Qt::NoBrush);
+            for (int i = 0; i < 3; ++i) p->drawArc(QRectF(-12 + 8 * i, -5, 8, 10), 0, 180 * 16);
+        }
+        p->restore();
+    }
+    // barrettes
+    p->setPen(QPen(QColor(214, 126, 34), 8, Qt::SolidLine, Qt::RoundCap));
+    if (mode == 0) p->drawLine(T[0], T[2]);
+    if (mode == 1) for (int k = 0; k < 3; ++k) p->drawLine(T[k], B[k]);
+    if (mode == 2) { p->drawLine(T[0], T[2]); p->drawLine(B[0], B[2]); }
+    // bornes et noms
+    f.setPixelSize(11); f.setBold(true); p->setFont(f);
+    for (int k = 0; k < 3; ++k) {
+        for (const QPointF &c : {T[k], B[k]}) {
+            p->setPen(QPen(QColor(30, 30, 30), 1.5)); p->setBrush(QColor(170, 172, 178));
+            p->drawEllipse(c, 8, 8);
+            p->setPen(Qt::NoPen); p->setBrush(QColor(20, 20, 22));
+            p->drawEllipse(c, 3.2, 3.2);
+        }
+        p->setPen(QColor(20, 20, 20));
+        p->drawText(QRectF(T[k].x() - 30, yT - 26, 60, 14), Qt::AlignCenter, top.value(k));
+        p->drawText(QRectF(B[k].x() - 30, yB + 11, 60, 14), Qt::AlignCenter, bot.value(k));
+    }
+    // arrivees
+    auto arrow = [&](QPointF from, QPointF to, const QString &name, const QColor &col, bool nameAtStart) {
+        p->setPen(QPen(col, 2.2));
+        p->drawLine(from, to);
+        const double a = std::atan2(to.y() - from.y(), to.x() - from.x());
+        QPolygonF h; h << to << to - QPointF(std::cos(a - 0.45), std::sin(a - 0.45)) * 9 << to - QPointF(std::cos(a + 0.45), std::sin(a + 0.45)) * 9;
+        p->setBrush(col); p->drawPolygon(h);
+        const QPointF t = nameAtStart ? from : to;
+        p->drawText(QRectF(t.x() - 22, from.y() < to.y() ? t.y() - 16 : t.y() + 2, 44, 14), Qt::AlignCenter, name);
+    };
+    const QColor red(200, 35, 35), blue(40, 90, 210);
+    if (mode == 2) {
+        arrow(QPointF(B[0].x(), yB + 62), QPointF(B[0].x(), yB + 27), QStringLiteral("PH"), red, true);
+        arrow(QPointF(T[1].x() + 34, yT - 44), QPointF(T[1].x() + 10, yT - 12), QStringLiteral("N"), blue, true);
+    } else {
+        for (int k = 0; k < 3; ++k)
+            arrow(QPointF(B[k].x(), yB + 62), QPointF(B[k].x(), yB + 27), QStringLiteral("L%1").arg(k + 1), red, true);
+    }
+    f.setPixelSize(11); f.setBold(false); p->setFont(f);
+    p->setPen(QColor(60, 60, 60));
+    p->drawText(QRectF(r.left(), yB + 80, r.width(), 14), Qt::AlignCenter,
+                mode == 2 ? QStringLiteral("alimentation : douilles MONOPHASE") : QStringLiteral("alimentation : douilles TRIPHASE"));
+    if (active) {
+        f.setBold(true); p->setFont(f);
+        p->setPen(QColor(30, 140, 60));
+        p->drawText(QRectF(r.left(), r.bottom() - 20, r.width(), 16), Qt::AlignCenter, QStringLiteral("COUPLAGE ACTUEL DU CHARIOT"));
+    }
+}
+
+// ---- Chariots de charges : commutateurs en facade, plaque de couplage, 6 bornes, entrees TRIPHASE / MONOPHASE ----
+// Les 3 elements sont entre U1-U2, V1-V2, W1-W2. Bornes disposees comme sur la plaque :
+//      W2  U2  V2      rangee du haut pontee = ETOILE
+//      U1  V1  W1      3 barrettes verticales = TRIANGLE ; les deux rangees pontees = MONO (elements en parallele)
+// Entrees TRIPHASE reliees a U1 V1 W1 ; entree MONOPHASE : rouge (PH) = U1, bleu (N) = U2.
 class Cart : public BenchModule {
 public:
-    struct Sw { QPointF c; QStringList pos; std::vector<double> pct; int param; };
+    struct Sw { QPointF c; QStringList pos; std::vector<double> pct; int param; double a0; };
     Cart(const QString &t, const QColor &col) : BenchModule(t, 320, 450, col) {
         setAcceptHoverEvents(true);
         plateOnly = true;
     }
     void terminals(const QColor &triCol) {
-        const char *top[3] = {"U1", "V1", "W1"}, *bot[3] = {"W2", "U2", "V2"};
-        for (int k = 0; k < 3; ++k) a1[k] = addSocket(top[k], QColor(120, 122, 128), 110 + 50 * k, 292);
-        for (int k = 0; k < 3; ++k) bsock[k] = addSocket(bot[k], QColor(120, 122, 128), 110 + 50 * k, 332);
+        const char *bot[3] = {"U1", "V1", "W1"}, *top[3] = {"W2", "U2", "V2"};
+        for (int k = 0; k < 3; ++k) a1[k] = addSocket(bot[k], QColor(120, 122, 128), 110 + 50 * k, 346);
+        for (int k = 0; k < 3; ++k) bsock[k] = addSocket(top[k], QColor(120, 122, 128), 110 + 50 * k, 312);
         a2[0] = bsock[1]; a2[1] = bsock[2]; a2[2] = bsock[0];              // U2, V2, W2
-        pe = addSocket("PE", cPE, 40, 372);
+        pe = addSocket("PE", cPE, 36, 330);
         for (int k = 0; k < 3; ++k) tri[k] = addSocket(QStringLiteral("L%1").arg(k + 1), triCol, 70 + 40 * k, 412);
         mB = addSocket("N", cBlue, 230, 412);
         mR = addSocket("PH", cRed, 280, 412);
@@ -1713,82 +2037,155 @@ public:
         for (const Sw &q : sw) s += q.pct[qBound(0, (int)params[q.param].value, (int)q.pct.size() - 1)];
         return s;
     }
-    void addSwitch(QPointF c, const QStringList &pos, std::vector<double> pct) {
+    // a0 : angle de la premiere position (0 = en haut, -90 = a gauche), les suivantes dans le sens horaire
+    void addSwitch(QPointF c, const QStringList &pos, std::vector<double> pct, double a0) {
         const int n = (int)pos.size();
         params.push_back({QStringLiteral("Commutateur %1").arg(sw.size() + 1), "", 0.0, double(n - 1), 0.0, 1.0, 0});
-        sw.push_back({c, pos, std::move(pct), (int)params.size() - 1});
+        sw.push_back({c, pos, std::move(pct), (int)params.size() - 1, a0});
+    }
+    // couplage realise par les fils : 0 etoile, 1 triangle, 2 mono (parallele), -1 aucun
+    int coupling() const {
+        auto n = [](const BenchSocket *s) { return s->net; };
+        if (n(a1[0]) < 0) return -1;
+        const bool topAll = n(bsock[0]) == n(bsock[1]) && n(bsock[1]) == n(bsock[2]);
+        const bool botAll = n(a1[0]) == n(a1[1]) && n(a1[1]) == n(a1[2]);
+        if (topAll && botAll) return n(a1[0]) != n(bsock[0]) ? 2 : -1;
+        if (topAll) return 0;
+        if (n(a1[0]) == n(bsock[0]) && n(a1[1]) == n(bsock[1]) && n(a1[2]) == n(bsock[2])) return 1;
+        return -1;
+    }
+    static QString couplingName(int c) {
+        return c == 0 ? QStringLiteral("ETOILE") : c == 1 ? QStringLiteral("TRIANGLE") : c == 2 ? QStringLiteral("MONO") : QStringLiteral("non couple");
     }
     static void drawSwitch(QPainter *p, const Sw &q, int pos, bool dark) {
         p->setPen(QPen(QColor(20, 20, 20), 1.5));
-        p->setBrush(dark ? QColor(28, 28, 30) : QColor(236, 236, 232));
-        p->drawRoundedRect(QRectF(q.c.x() - 36, q.c.y() - 36, 72, 72), 6, 6);
+        p->setBrush(dark ? QColor(28, 28, 30) : QColor(226, 226, 220));
+        p->drawRoundedRect(QRectF(q.c.x() - 40, q.c.y() - 40, 80, 80), 7, 7);
         QFont f = p->font(); f.setPixelSize(8); f.setBold(true); p->setFont(f);
         const int n = (int)q.pos.size();
-        // positions reparties autour du bouton : ARRET en haut, puis dans le sens horaire
         for (int i = 0; i < n; ++i) {
-            const double a = (n == 2 ? 90.0 * i : 90.0 * i) * 3.14159265 / 180.0;
-            const QPointF t(q.c.x() + 27 * std::sin(a), q.c.y() - 27 * std::cos(a));
+            const double a = (q.a0 + 90.0 * i) * 3.14159265 / 180.0;
+            const bool side = std::abs(std::sin(a)) > 0.5;                   // etiquette de gauche ou de droite : plus etroite
+            const QPointF t(q.c.x() + 28 * std::sin(a), q.c.y() - 31 * std::cos(a));
+            const double hw = side ? 11 : 16;
             p->setPen(Qt::NoPen);
-            p->setBrush(i == pos ? QColor(255, 235, 120) : QColor(245, 245, 245));
-            p->drawRoundedRect(QRectF(t.x() - 15, t.y() - 6, 30, 12), 3, 3);
+            p->setBrush(i == pos ? QColor(255, 225, 90) : QColor(240, 238, 228));
+            p->drawRoundedRect(QRectF(t.x() - hw, t.y() - 6, 2 * hw, 12), 3, 3);
             p->setPen(QColor(20, 20, 20));
-            p->drawText(QRectF(t.x() - 16, t.y() - 6, 32, 12), Qt::AlignCenter, q.pos[i]);
+            p->drawText(QRectF(t.x() - hw - 2, t.y() - 6, 2 * hw + 4, 12), Qt::AlignCenter, q.pos[i]);
         }
         p->save();
         p->translate(q.c);
-        p->rotate(90.0 * pos);
+        p->rotate(q.a0 + 90.0 * pos);
         p->setPen(QPen(QColor(10, 10, 10), 1));
         p->setBrush(dark ? QColor(60, 60, 64) : QColor(170, 172, 176));
-        p->drawEllipse(QPointF(0, 0), 15, 15);
+        p->drawEllipse(QPointF(0, 0), 13, 13);
         p->setBrush(dark ? QColor(20, 20, 22) : QColor(120, 122, 126));
-        QPolygonF h; h << QPointF(0, -22) << QPointF(6, -4) << QPointF(4, 14) << QPointF(-4, 14) << QPointF(-6, -4);
+        QPolygonF h; h << QPointF(0, -16) << QPointF(6, -4) << QPointF(4, 12) << QPointF(-4, 12) << QPointF(-6, -4);
         p->drawPolygon(h);
+        p->setPen(QPen(QColor(240, 240, 240), 1.5));
+        p->drawLine(QPointF(0, -14), QPointF(0, -7));                        // index blanc de la manette
+        p->setPen(QPen(QColor(10, 10, 10), 1));
         p->setBrush(QColor(190, 160, 60));
         p->drawEllipse(QPointF(0, 0), 3, 3);
         p->restore();
     }
     int swAt(QPointF p) const {
         for (size_t i = 0; i < sw.size(); ++i)
-            if (QRectF(sw[i].c.x() - 36, sw[i].c.y() - 36, 72, 72).contains(p)) return (int)i;
+            if (QRectF(sw[i].c.x() - 40, sw[i].c.y() - 40, 80, 80).contains(p)) return (int)i;
         return -1;
     }
-    void paintTerminals(QPainter *p, const QString &ratingLine) {
+    QRectF plateRect() const { return QRectF(40, 216, 240, 78); }
+    // plaque gravee : res = chariot resistif (4 KW), sinon capacitif (4 KVA)
+    void drawPlate(QPainter *p, const QRectF &r, int active) const {
+        plateFrame(p, r);
+        const double fs = r.height() / 8.5, pad = r.height() * 0.05;
+        auto ink = [&](int m) { return m == active ? kInkOn : kInk; };
+        const QString u = unitName();
+        if (resistive()) {
+            const double h1 = r.height() * 0.5, xm = r.center().x();
+            inkLine(p, r, QPointF(r.left(), r.top() + h1), QPointF(r.right(), r.top() + h1));
+            inkLine(p, r, QPointF(xm, r.top()), QPointF(xm, r.top() + h1));
+            for (int m = 0; m < 2; ++m) {
+                const QRectF c(m == 0 ? r.left() : xm, r.top(), r.width() / 2, h1);
+                inkText(p, QRectF(c.left(), c.top() + pad, c.width(), fs * 1.3), QStringLiteral("4 %1  TRI  %2 V").arg(u).arg(m == 0 ? 380 : 220), fs, Qt::AlignCenter, ink(m));
+                boardPicto(p, QRectF(c.center().x() - c.width() * 0.26, c.top() + pad + fs * 1.4, c.width() * 0.52, h1 - pad * 2 - fs * 1.4), 2, 3, straps3(m), ink(m));
+            }
+            const QRectF c(r.left(), r.top() + h1, r.width(), r.height() - h1);
+            const double lh = (c.height() - 2 * pad) / 3;
+            const char *l1[3] = {"4 %1 MONO   CONT 220V", "1,33   \"        \"    127V", "1        \"        \"    110V"};
+            for (int i = 0; i < 3; ++i)
+                inkText(p, QRectF(c.left() + c.width() * 0.05, c.top() + pad + lh * i, c.width() * 0.6, lh),
+                        i == 0 ? QString::fromLatin1(l1[0]).arg(u) : QString::fromLatin1(l1[i]), fs * 0.92, Qt::AlignLeft | Qt::AlignVCenter, ink(2));
+            boardPicto(p, QRectF(c.left() + c.width() * 0.66, c.top() + pad, c.width() * 0.28, c.height() - 2 * pad), 2, 3, straps3(2), ink(2));
+        } else {
+            const double xm = r.left() + r.width() * 0.48, h1 = r.height() * 0.5;
+            inkLine(p, r, QPointF(xm, r.top()), QPointF(xm, r.bottom()));
+            inkLine(p, r, QPointF(r.left(), r.top() + h1), QPointF(xm, r.top() + h1));
+            for (int m = 0; m < 2; ++m) {
+                const QRectF c(r.left(), r.top() + h1 * m, xm - r.left(), h1);
+                inkText(p, QRectF(c.left(), c.top() + pad, c.width(), fs * 1.3), QStringLiteral("4 %1  TRI  %2 V").arg(u).arg(m == 0 ? 380 : 220), fs, Qt::AlignCenter, ink(m));
+                boardPicto(p, QRectF(c.center().x() - c.width() * 0.27, c.top() + pad + fs * 1.4, c.width() * 0.54, h1 - pad * 2 - fs * 1.4), 2, 3, straps3(m), ink(m));
+            }
+            const QRectF c(xm, r.top(), r.right() - xm, r.height());
+            boardPicto(p, QRectF(c.center().x() - c.width() * 0.26, c.top() + pad, c.width() * 0.52, c.height() * 0.42), 2, 3, straps3(2), ink(2));
+            const double y0 = c.top() + c.height() * 0.5, lh = (c.height() * 0.5 - pad) / 3;
+            const char *l1[3] = {"4 %1  MONO  220 V", "1,33     \"       127 V", "1          \"       110 V"};
+            for (int i = 0; i < 3; ++i)
+                inkText(p, QRectF(c.left() + c.width() * 0.06, y0 + lh * i, c.width() * 0.9, lh),
+                        i == 0 ? QString::fromLatin1(l1[0]).arg(u) : QString::fromLatin1(l1[i]), fs * 0.8, Qt::AlignLeft | Qt::AlignVCenter, ink(2));
+        }
+    }
+    virtual bool resistive() const = 0;
+    virtual QString unitName() const = 0;
+    void paintCommon(QPainter *p, const QString &ratingLine, bool darkSw) {
+        for (const Sw &q : sw) drawSwitch(p, q, (int)params[q.param].value, darkSw);
         p->setPen(QPen(QColor(235, 235, 235), 1));
         p->setBrush(QColor(22, 22, 24));
-        p->drawRect(QRectF(60, 244, 200, 26));
+        p->drawRect(QRectF(30, 195, 260, 17));
         QFont f = p->font(); f.setPixelSize(9); f.setBold(true); p->setFont(f);
         p->setPen(Qt::white);
-        p->drawText(QRectF(60, 244, 200, 26), Qt::AlignCenter, ratingLine);
+        p->drawText(QRectF(30, 195, 260, 17), Qt::AlignCenter, ratingLine + QStringLiteral("  -  ") + couplingName(coupling()));
+        drawPlate(p, plateRect(), coupling());
         f.setPixelSize(8); p->setFont(f);
         p->setPen(body.lightness() < 120 ? QColor(240, 240, 240) : QColor(25, 25, 25));
-        p->drawText(QRectF(50, 384, 120, 12), Qt::AlignCenter, QStringLiteral("TRIPHASE"));
-        p->drawText(QRectF(205, 384, 100, 12), Qt::AlignCenter, QStringLiteral("MONOPHASE"));
-        // roulettes
-        p->setPen(QPen(QColor(40, 40, 40), 2));
+        p->drawText(QRectF(50, 380, 120, 12), Qt::AlignCenter, QStringLiteral("TRIPHASE"));
+        p->drawText(QRectF(205, 380, 100, 12), Qt::AlignCenter, QStringLiteral("MONOPHASE"));
+        p->setPen(QPen(QColor(40, 40, 40), 2));                          // roulettes
         p->setBrush(QColor(225, 70, 70));
         p->drawEllipse(QPointF(50, h - 2), 10, 10);
         p->drawEllipse(QPointF(w - 50, h - 2), 10, 10);
     }
-    QString couplingHtml(const QString &head, const QString &u) const {
+    int elemKind() const { return resistive() ? 0 : 2; }
+    QPixmap platePixmap() const override {
+        QPixmap pm(724, 500);
+        pm.fill(body);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        const int c = coupling();
+        drawPlate(&p, QRectF(142, 12, 440, 190), c);
+        const QStringList top{"W2", "U2", "V2"}, bot{"U1", "V1", "W1"};
+        const char *tt[3] = {"ETOILE  -  TRI 380 / 400 V", "TRIANGLE  -  TRI 220 / 230 V", "MONO 220 / 230 V  (127 V, 110 V)"};
+        const char *ss[3] = {"barrette W2 - U2 - V2", "barrettes U1-W2, V1-U2, W1-V2", "W2 - U2 - V2 et U1 - V1 - W1"};
+        for (int m = 0; m < 3; ++m)
+            wiringDiagram(&p, QRectF(8 + 238 * m, 214, 232, 278), m, top, bot, QString::fromLatin1(tt[m]), QString::fromLatin1(ss[m]), elemKind(), m == c);
+        return pm;
+    }
+    QString stateHtml(const QString &head, const QString &now) const {
+        const int c = coupling();
         return head + QStringLiteral(
-            "<p><b>Bornes de couplage</b> (3 elements : U1-U2, V1-V2, W1-W2)</p>"
-            "<pre>   U1   V1   W1\n   W2   U2   V2</pre>"
-            "<table border='1' cellspacing='0' cellpadding='4'>"
-            "<tr><th>Reseau</th><th>Couplage</th><th>Barrettes (fils) a poser</th><th>Alimentation</th></tr>"
-            "<tr><td>TRI 380 / 400 V</td><td>etoile</td><td>W2 - U2 - V2 (rangee du bas)</td><td>TRIPHASE L1 L2 L3</td></tr>"
-            "<tr><td>TRI 220 / 230 V</td><td>triangle</td><td>U1 - W2, V1 - U2, W1 - V2 (verticales)</td><td>TRIPHASE L1 L2 L3</td></tr>"
-            "<tr><td>MONO %1 220 / 230 V</td><td>3 elements en parallele</td><td>U1 - V1 - W1 et W2 - U2 - V2</td><td>MONOPHASE PH / N</td></tr>"
-            "<tr><td>MONO 127 V</td><td>parallele</td><td>comme ci-dessus</td><td>puissance x 1/3</td></tr>"
-            "<tr><td>MONO 110 V</td><td>parallele</td><td>comme ci-dessus</td><td>puissance x 1/4</td></tr>"
-            "</table>"
-            "<p>Reglage actuel des commutateurs : <b>%2 %</b> de la puissance.</p>").arg(u).arg(fmt(percent(), 0));
+            "<p>Les 3 elements sont branches entre U1-U2, V1-V2 et W1-W2 (220 / 230 V maximum par element). "
+            "Les barrettes se posent avec des fils entre les 6 bornes grises, comme sur les dessins.</p>"
+            "<p>Commutateurs : <b>%1 %</b> &nbsp;|&nbsp; %2 &nbsp;|&nbsp; couplage actuel : <b>%3</b></p>")
+            .arg(fmt(percent(), 0)).arg(now).arg(couplingName(c));
     }
 protected:
     void mousePressEvent(QGraphicsSceneMouseEvent *e) override {
-        const int i = e->button() == Qt::LeftButton ? swAt(e->pos()) : -1;
+        const int i = (e->button() == Qt::LeftButton || e->button() == Qt::RightButton) ? swAt(e->pos()) : -1;
         if (i < 0) { BenchModule::mousePressEvent(e); return; }
         BenchParam &pr = params[sw[i].param];
-        pr.value = (int(pr.value) + 1) % (int)sw[i].pos.size();
+        const int n = (int)sw[i].pos.size();
+        pr.value = (int(pr.value) + (e->button() == Qt::LeftButton ? 1 : n - 1)) % n;     // clic droit : cran precedent
         update();
         if (changed) changed();
         e->accept();
@@ -1799,8 +2196,8 @@ protected:
     }
     void hoverMoveEvent(QGraphicsSceneHoverEvent *e) override {
         const bool onSw = swAt(e->pos()) >= 0;
-        setToolTip(onSw ? QStringLiteral("Commutateur : cliquer pour passer a la position suivante.")
-                        : QStringLiteral("Double-clic : plaque signaletique et couplages."));
+        setToolTip(onSw ? QStringLiteral("Commutateur : clic = cran suivant, clic droit = cran precedent.")
+                        : QStringLiteral("Double-clic : plaque signaletique et dessins des couplages."));
         setCursor(onSw ? Qt::PointingHandCursor : Qt::ArrowCursor);
     }
 public:
@@ -1810,11 +2207,15 @@ public:
 
 class ResCart : public Cart {                        // charge resistive 4 kW
 public:
-    ResCart() : Cart(QStringLiteral("Charge resistive 4 kW"), QColor(150, 128, 92)) {
-        for (double x : {110.0, 210.0}) addSwitch(QPointF(x, 78), {"ARRET", "5 %"}, {0, 5});
-        for (double x : {60.0, 160.0, 260.0}) addSwitch(QPointF(x, 172), {"ARRET", "10 %", "20 %", "30 %"}, {0, 10, 20, 30});
+    ResCart() : Cart(QStringLiteral("Charge resistive 4 kW"), QColor(150, 118, 92)) {
+        // commutateurs du chariot : 0 - 0 - 1 - 2 %, 0 - 3 - 6 - 9 %, puis 3 x (0 - 10 - 20 - 30 %)
+        addSwitch(QPointF(110, 64), {"0", "0", "1 %", "2 %"}, {0, 0, 1, 2}, -90);
+        addSwitch(QPointF(210, 64), {"0", "3 %", "6 %", "9 %"}, {0, 3, 6, 9}, -90);
+        for (double x : {60.0, 160.0, 260.0}) addSwitch(QPointF(x, 150), {"0", "10 %", "20 %", "30 %"}, {0, 10, 20, 30}, -90);
         terminals(cRed);
     }
+    bool resistive() const override { return true; }
+    QString unitName() const override { return QStringLiteral("KW"); }
     double g() const { return percent() / 100.0 / 36.3; }           // 4 kW sous 380 V etoile : 36,3 ohm par element a 100 %
     void elements(std::vector<BenchElem> &el) override {
         if (g() <= 0) return;
@@ -1831,15 +2232,11 @@ public:
         warn = u > 245 ? QStringLiteral("SURTENSION %1 V par element : revoir le couplage").arg(fmt(u, 0)) : QString();
     }
     void paintExtra(QPainter *p) override {
-        for (const Sw &q : sw) drawSwitch(p, q, (int)params[q.param].value, false);
-        paintTerminals(p, QStringLiteral("4 kW  -  %1 %  -  %2 W").arg(fmt(percent(), 0)).arg(fmt(power, 0)));
+        paintCommon(p, QStringLiteral("%1 %  -  %2 W").arg(fmt(percent(), 0)).arg(fmt(power, 0)), true);
     }
     QString plateHtml() const override {
-        return couplingHtml(QStringLiteral("<h3>Charge resistive - 4 kW</h3>"
-            "<p>4 kW TRI 380 V (etoile) &nbsp;|&nbsp; 4 kW TRI 220 V (triangle) &nbsp;|&nbsp; 4 kW MONO ou CONTINU 220 V<br>"
-            "1,33 kW sous 127 V &nbsp;|&nbsp; 1 kW sous 110 V</p>"
-            "<p>Commutateurs : 2 x (ARRET / 5 %) et 3 x (ARRET / 10 / 20 / 30 %). Element : 36,3 ohm a 100 %, 220 V max.</p>"),
-            QStringLiteral("ou CONTINU"));
+        return stateHtml(QStringLiteral("<h3>Charge resistive - 4 kW</h3>"),
+                         QStringLiteral("puissance absorbee : <b>%1 W</b> (element : %2 ohm)").arg(fmt(power, 0)).arg(g() > 0 ? fmt(1.0 / g(), 1) : QStringLiteral("infini")));
     }
     double power = 0;
 };
@@ -1847,11 +2244,16 @@ public:
 class CapCart : public Cart {                        // charge capacitive 4 kvar
 public:
     CapCart() : Cart(QStringLiteral("Charge capacitive 4 kVAR"), QColor(150, 140, 110)) {
+        // 6 commutateurs a 4 crans : ARRET - x % - ARRET - x %
         const double pc[6] = {5, 10, 10, 25, 25, 25};
-        for (int i = 0; i < 6; ++i)
-            addSwitch(QPointF(60 + 100 * (i % 3), i < 3 ? 78 : 172), {"ARRET", QStringLiteral("%1 %").arg(pc[i])}, {0, pc[i]});
+        for (int i = 0; i < 6; ++i) {
+            const QString t = QStringLiteral("%1 %").arg(pc[i]);
+            addSwitch(QPointF(60 + 100 * (i % 3), i < 3 ? 64 : 150), {"ARRET", t, "ARRET", t}, {0, pc[i], 0, pc[i]}, 0);
+        }
         terminals(cRed);
     }
+    bool resistive() const override { return false; }
+    QString unitName() const override { return QStringLiteral("KVA"); }
     double cap() const { return percent() / 100.0 * 87.7e-6; }      // 4 kvar sous 380 V etoile : 87,7 uF par element a 100 %
     void elements(std::vector<BenchElem> &el) override {
         if (cap() <= 0) return;
@@ -1868,40 +2270,48 @@ public:
         warn = u > 245 ? QStringLiteral("SURTENSION %1 V par element : revoir le couplage").arg(fmt(u, 0)) : QString();
     }
     void paintExtra(QPainter *p) override {
-        for (const Sw &q : sw) drawSwitch(p, q, (int)params[q.param].value, true);
-        paintTerminals(p, QStringLiteral("4 kVAR  -  %1 %  -  %2 var").arg(fmt(percent(), 0)).arg(fmt(qvar, 0)));
+        paintCommon(p, QStringLiteral("%1 %  -  %2 var").arg(fmt(percent(), 0)).arg(fmt(qvar, 0)), true);
     }
     QString plateHtml() const override {
-        return couplingHtml(QStringLiteral("<h3>Charge capacitive - 4 kVAR</h3>"
-            "<p>4 kVA TRI 380 V (etoile) &nbsp;|&nbsp; 4 kVA TRI 220 V (triangle) &nbsp;|&nbsp; 4 kVA MONO 220 V<br>"
-            "1,33 kVA sous 127 V &nbsp;|&nbsp; 1 kVA sous 110 V</p>"
-            "<p>Commutateurs : 5 %, 10 %, 10 %, 25 %, 25 %, 25 %. Element : 87,7 uF a 100 %, 220 V max.</p>"), QString());
+        return stateHtml(QStringLiteral("<h3>Charge capacitive - 4 kVAR</h3>"),
+                         QStringLiteral("puissance reactive fournie : <b>%1 var</b> (element : %2 uF)").arg(fmt(qvar, 0)).arg(fmt(cap() * 1e6, 1)));
     }
     double qvar = 0;
 };
 
 // ---- Charge inductive a noyau plongeur : 6 bobinages (2 par phase), volant de reglage sur la face ------------
+// Douilles noires, par phase :   E2  S1      bobinages E1-S1 et E2-S2 d'une meme colonne
+//                                E1  S2      SERIE = barrette E2-S1 ; PARALLELE = barrettes E2-E1 et S1-S2
+// Douilles vertes (reliees en interne aux douilles noires de meme nom) :   S6  S2  S4
+//                                                                          E1  E3  E5
+//   etoile = S6-S2-S4 ; triangle = S6-E1, S2-E3, S4-E5 ; mono = S6-S2-S4 et E1-E3-E5.
 class IndCart : public BenchModule {
 public:
-    IndCart() : BenchModule(QStringLiteral("Charge inductive reglable"), 320, 450, QColor(150, 128, 92)) {
+    IndCart() : BenchModule(QStringLiteral("Charge inductive reglable"), 320, 450, QColor(158, 134, 118)) {
         setAcceptHoverEvents(true);
         plateOnly = true;
+        const QColor blk(52, 48, 46), grn(40, 150, 70);
         for (int g = 0; g < 3; ++g)
             for (int r = 0; r < 2; ++r) {
-                const int n = 2 * g + r + 1;
-                const double x0 = 45 + 95 * g, y = 62 + 44 * r;
-                e[n - 1] = addSocket(QStringLiteral("E%1").arg(n), QColor(110, 80, 50), x0, y);
-                s[n - 1] = addSocket(QStringLiteral("S%1").arg(n), QColor(110, 80, 50), x0 + 42, y);
+                const int n = 2 * g + r + 1;                                 // r = 0 : bobinage impair, r = 1 : pair
+                const double cx = 60 + 100 * g;
+                e[n - 1] = addSocket(QStringLiteral("E%1").arg(n), blk, cx - 20, r == 0 ? 84 : 48);
+                s[n - 1] = addSocket(QStringLiteral("S%1").arg(n), blk, cx + 20, r == 0 ? 48 : 84);
             }
-        for (int k = 0; k < 6; ++k) spare[k] = addSocket(QStringLiteral("R%1").arg(k + 1), QColor(40, 150, 70), 110 + 50 * (k % 3), 300 + 38 * (k / 3));
-        pe = addSocket("PE", cPE, 40, 372);
+        const char *gn[6] = {"S6", "S2", "S4", "E1", "E3", "E5"};
+        for (int k = 0; k < 6; ++k) spare[k] = addSocket(QString::fromLatin1(gn[k]), grn, 134 + 26 * (k % 3), 262 + 40 * (k / 3));
+        pe = addSocket("PE", cPE, 137, 412);
         mB = addSocket("N", cBlue, 40, 412);
         mR = addSocket("PH", cRed, 85, 412);
-        for (int k = 0; k < 3; ++k) tri[k] = addSocket(QStringLiteral("L%1").arg(k + 1), cBlack, 190 + 45 * k, 412);
+        for (int k = 0; k < 3; ++k) tri[k] = addSocket(QStringLiteral("L%1").arg(k + 1), cRed, 190 + 45 * k, 412);
         params = { {"Position du volant (0 = L min, 100 = L max)", "%", 0, 100, 100, 1, 0} };
     }
+    BenchSocket *gTop(int k) const { return spare[k]; }          // S6, S2, S4
+    BenchSocket *gBot(int k) const { return spare[3 + k]; }      // E1, E3, E5
     bool hasLinks() const override { return true; }
     void links(std::vector<std::pair<BenchSocket *, BenchSocket *>> &l) override {
+        l.push_back({spare[0], s[5]}); l.push_back({spare[1], s[1]}); l.push_back({spare[2], s[3]});   // vertes du haut
+        for (int k = 0; k < 3; ++k) l.push_back({spare[3 + k], e[2 * k]});                             // vertes du bas
         for (int k = 0; k < 3; ++k) l.push_back({tri[k], e[2 * k]});            // L1 = E1, L2 = E3, L3 = E5
         l.push_back({mR, e[0]});
         l.push_back({mB, s[1]});                                                  // N = S2
@@ -1930,59 +2340,160 @@ public:
         imax = im;
         warn = im > 6.55 ? QStringLiteral("SURCHARGE %1 A par bobinage (6,5 A permanent)").arg(fmt(im, 1)) : QString();
     }
-    QPointF dialC() const { return QPointF(160, 205); }
+    // montage des colonnes : 0 serie, 1 parallele, -1 non fait ou different d'une colonne a l'autre
+    int columnMode() const {
+        if (e[0]->net < 0) return -1;
+        int ser = 0, par = 0;
+        for (int g = 0; g < 3; ++g) {
+            const bool p_ = e[2 * g]->net == e[2 * g + 1]->net && s[2 * g]->net == s[2 * g + 1]->net;
+            const bool s_ = s[2 * g]->net == e[2 * g + 1]->net;
+            if (p_ && !s_) ++par; else if (s_ && !p_) ++ser;
+        }
+        return ser == 3 ? 0 : par == 3 ? 1 : -1;
+    }
+    // couplage entre colonnes : 0 etoile, 1 triangle, 2 mono, -1 aucun
+    int coupling() const {
+        auto n = [](const BenchSocket *x) { return x->net; };
+        if (n(e[0]) < 0) return -1;
+        const bool topAll = n(gTop(0)) == n(gTop(1)) && n(gTop(1)) == n(gTop(2));
+        const bool botAll = n(gBot(0)) == n(gBot(1)) && n(gBot(1)) == n(gBot(2));
+        if (topAll && botAll) return n(gTop(0)) != n(gBot(0)) ? 2 : -1;
+        if (topAll) return 0;
+        if (n(gTop(0)) == n(gBot(0)) && n(gTop(1)) == n(gBot(1)) && n(gTop(2)) == n(gBot(2))) return 1;
+        return -1;
+    }
+    QPointF dialC() const { return QPointF(160, 166); }
+    // plaque de gauche : caracteristiques par bobinage
+    static void drawDataPlate(QPainter *p, const QRectF &r, int colMode) {
+        plateFrame(p, r);
+        const double fs = r.height() / 15.0, hh = r.height() * 0.15, bh = (r.height() - hh) / 2;
+        inkText(p, QRectF(r.left(), r.top(), r.width(), hh), QStringLiteral("PAR BOBINAGE"), fs * 1.05);
+        const char *nm[2] = {"PARALLELE", "SERIE"};
+        const char *ln[2][5] = {{"L max =  0,214 H", "L min =  0,019 H", "I permanent =  13 A", "I max interm. =  21,7 A", "R cuivre =  0,46 ohm"},
+                                {"L max =  0,856 H", "L min =  0,076 H", "I permanent =  6,5 A", "I max interm. =  10,8 A", "R cuivre =  1,84 ohm"}};
+        for (int b = 0; b < 2; ++b) {
+            const QRectF c(r.left(), r.top() + hh + bh * b, r.width(), bh);
+            const QColor ink = (colMode == 1 - b) ? kInkOn : kInk;
+            inkLine(p, r, c.topLeft(), c.topRight());
+            const double xs = c.left() + c.width() * 0.35;
+            inkLine(p, r, QPointF(xs, c.top() + bh * 0.12), QPointF(xs, c.bottom() - bh * 0.12));
+            inkText(p, QRectF(c.left(), c.top() + bh * 0.18, xs - c.left(), bh * 0.3), QStringLiteral("MONTAGE"), fs * 0.95, Qt::AlignCenter, ink);
+            inkText(p, QRectF(c.left(), c.top() + bh * 0.52, xs - c.left(), bh * 0.3), QString::fromLatin1(nm[b]), fs * 0.95, Qt::AlignCenter, ink);
+            const double lh = bh * 0.84 / 5;
+            for (int i = 0; i < 5; ++i)
+                inkText(p, QRectF(xs + c.width() * 0.04, c.top() + bh * 0.08 + lh * i, c.right() - xs, lh), QString::fromLatin1(ln[b][i]), fs * 0.8,
+                        Qt::AlignLeft | Qt::AlignVCenter, ink);
+        }
+    }
+    // plaque de droite : SERIE / PARALLELE par colonne, puis etoile / triangle / mono
+    static void drawCouplingPlate(QPainter *p, const QRectF &r, int colMode, int coup) {
+        plateFrame(p, r);
+        const double fs = r.height() / 17.0, h1 = r.height() * 0.27, xl = r.left() + r.width() * 0.26;
+        const char *topN[3] = {"E2    S1", "E4    S3", "E6    S5"}, *botN[3] = {"E1    S2", "E3    S4", "E5    S6"};
+        for (int b = 0; b < 2; ++b) {                                         // 0 = SERIE, 1 = PARALLELE
+            const QRectF c(r.left(), r.top() + h1 * b, r.width(), h1);
+            const QColor ink = (colMode == b) ? kInkOn : kInk;
+            inkLine(p, r, c.bottomLeft(), c.bottomRight());
+            inkText(p, QRectF(c.left(), c.top(), xl - c.left(), c.height()), b == 0 ? QStringLiteral("SERIE") : QStringLiteral("PARALLELE"), fs, Qt::AlignCenter, ink);
+            const double gw = (c.right() - xl) / 3;
+            for (int g = 0; g < 3; ++g) {
+                const QRectF gr(xl + gw * g, c.top(), gw, c.height());
+                inkText(p, QRectF(gr.left(), gr.top() + c.height() * 0.03, gw, fs * 1.2), QString::fromLatin1(topN[g]), fs * 0.9, Qt::AlignCenter, ink);
+                inkText(p, QRectF(gr.left(), gr.bottom() - fs * 1.35, gw, fs * 1.2), QString::fromLatin1(botN[g]), fs * 0.9, Qt::AlignCenter, ink);
+                boardPicto(p, QRectF(gr.center().x() - gw * 0.34, gr.top() + fs * 1.35, gw * 0.68, c.height() - fs * 2.8), 2, 2,
+                           b == 0 ? std::vector<std::pair<int, int>>{{0, 1}} : std::vector<std::pair<int, int>>{{0, 2}, {1, 3}}, ink);
+            }
+        }
+        const QRectF c(r.left(), r.top() + 2 * h1, r.width(), r.height() - 2 * h1);
+        const double cw = c.width() / 3;
+        for (int m = 0; m < 3; ++m) {
+            const QRectF cell(c.left() + cw * m, c.top(), cw, c.height());
+            const QColor ink = (coup == m) ? kInkOn : kInk;
+            if (m > 0) inkLine(p, r, cell.topLeft(), cell.bottomLeft());
+            const QPointF sc(cell.center().x(), cell.top() + fs * 1.3);
+            p->setPen(QPen(ink, qMax(0.6, fs * 0.16))); p->setBrush(Qt::NoBrush);
+            if (m == 0) {                                                     // etoile
+                p->drawLine(sc, sc + QPointF(0, -fs * 0.8)); p->drawLine(sc, sc + QPointF(-fs * 0.7, fs * 0.6)); p->drawLine(sc, sc + QPointF(fs * 0.7, fs * 0.6));
+            } else if (m == 1) {                                              // triangle
+                QPolygonF t; t << sc + QPointF(0, -fs * 0.8) << sc + QPointF(-fs * 0.8, fs * 0.6) << sc + QPointF(fs * 0.8, fs * 0.6);
+                p->drawPolygon(t);
+            } else inkText(p, QRectF(cell.left(), cell.top() + fs * 0.5, cw, fs * 1.5), QStringLiteral("MONO"), fs, Qt::AlignCenter, ink);
+            inkText(p, QRectF(cell.left(), cell.top() + fs * 2.3, cw, fs * 1.2), QStringLiteral("S6   S2   S4"), fs * 0.9, Qt::AlignCenter, ink);
+            inkText(p, QRectF(cell.left(), cell.bottom() - fs * 1.4, cw, fs * 1.2), QStringLiteral("E1   E3   E5"), fs * 0.9, Qt::AlignCenter, ink);
+            boardPicto(p, QRectF(cell.center().x() - cw * 0.36, cell.top() + fs * 3.6, cw * 0.72, cell.height() - fs * 5.2), 2, 3, straps3(m), ink);
+        }
+    }
     void paintExtra(QPainter *p) override {
         const QPointF c = dialC();
         // volant de reglage
         p->setPen(QPen(QColor(15, 15, 15), 1));
         p->setBrush(QColor(225, 225, 220));
-        p->drawEllipse(c, 30, 30);
-        p->setPen(QPen(QColor(15, 15, 15), 9));
+        p->drawEllipse(c, 24, 24);
+        p->setPen(QPen(QColor(15, 15, 15), 8));
         p->setBrush(Qt::NoBrush);
-        p->drawEllipse(c, 50, 50);
+        p->drawEllipse(c, 40, 40);
         p->save();
         p->translate(c);
         p->rotate(-150 + 3.0 * params[0].value);
-        p->setPen(QPen(QColor(15, 15, 15), 6, Qt::SolidLine, Qt::RoundCap));
-        for (int k = 0; k < 3; ++k) { p->drawLine(QPointF(0, 0), QPointF(0, -48)); p->rotate(120); }
+        p->setPen(QPen(QColor(15, 15, 15), 5, Qt::SolidLine, Qt::RoundCap));
+        for (int k = 0; k < 3; ++k) { p->drawLine(QPointF(0, 0), QPointF(0, -38)); p->rotate(120); }
         p->setPen(QPen(QColor(200, 202, 206), 5, Qt::SolidLine, Qt::RoundCap));
-        p->drawLine(QPointF(0, -50), QPointF(0, -62));                        // poignee
+        p->drawLine(QPointF(0, -40), QPointF(0, -50));                        // poignee
         p->setPen(Qt::NoPen);
         p->setBrush(QColor(25, 25, 27));
-        p->drawEllipse(QPointF(0, 0), 14, 14);
+        p->drawEllipse(QPointF(0, 0), 12, 12);
         p->restore();
-        QFont f = p->font(); f.setPixelSize(9); f.setBold(true); p->setFont(f);
+        QFont f = p->font(); f.setPixelSize(8); f.setBold(true); p->setFont(f);
         p->setPen(QColor(25, 25, 25));
-        p->drawText(QRectF(10, 262, 300, 14), Qt::AlignCenter,
-                    QStringLiteral("L = %1 H par bobinage (volant %2 %)  -  I max %3 A").arg(fmt(L1(), 3)).arg(fmt(params[0].value, 0)).arg(fmt(imax, 2)));
+        p->drawText(QRectF(4, 138, 100, 60), Qt::AlignCenter | Qt::TextWordWrap, QStringLiteral("L min\n0 %"));
+        p->drawText(QRectF(216, 138, 100, 60), Qt::AlignCenter | Qt::TextWordWrap, QStringLiteral("L max\n100 %"));
+        f.setPixelSize(9); p->setFont(f);
+        const int cm = columnMode(), cp = coupling();
+        p->drawText(QRectF(4, 220, 312, 14), Qt::AlignCenter,
+                    QStringLiteral("volant %1 %  -  L = %2 H / bobinage  -  %3  -  %4").arg(fmt(params[0].value, 0)).arg(fmt(L1(), 3))
+                        .arg(cm == 0 ? QStringLiteral("SERIE") : cm == 1 ? QStringLiteral("PARALLELE") : QStringLiteral("colonnes non pontees"))
+                        .arg(Cart::couplingName(cp)));
+        drawDataPlate(p, QRectF(8, 240, 104, 104), cm);
+        drawCouplingPlate(p, QRectF(208, 240, 104, 104), cm, cp);
         f.setPixelSize(8); p->setFont(f);
-        p->drawText(QRectF(10, 384, 110, 12), Qt::AlignCenter, QStringLiteral("MONOPHASE"));
-        p->drawText(QRectF(170, 384, 130, 12), Qt::AlignCenter, QStringLiteral("TRIPHASE"));
+        p->setPen(QColor(25, 25, 25));
+        p->drawText(QRectF(10, 380, 110, 12), Qt::AlignCenter, QStringLiteral("MONOPHASE"));
+        p->drawText(QRectF(170, 380, 130, 12), Qt::AlignCenter, QStringLiteral("TRIPHASE"));
         p->setPen(QPen(QColor(40, 40, 40), 2));
         p->setBrush(QColor(225, 70, 70));
         p->drawEllipse(QPointF(50, h - 2), 10, 10);
         p->drawEllipse(QPointF(w - 50, h - 2), 10, 10);
     }
+    QPixmap platePixmap() const override {
+        QPixmap pm(764, 566);
+        pm.fill(body);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        const int cm = columnMode(), cp = coupling();
+        drawDataPlate(&p, QRectF(10, 12, 300, 262), cm);
+        drawCouplingPlate(&p, QRectF(324, 12, 430, 262), cm, cp);
+        const QStringList top{"S6", "S2", "S4"}, bot{"E1", "E3", "E5"};
+        const char *tt[3] = {"ETOILE", "TRIANGLE", "MONO"};
+        const char *ss[3] = {"barrette S6 - S2 - S4", "barrettes S6-E1, S2-E3, S4-E5", "S6 - S2 - S4 et E1 - E3 - E5"};
+        for (int m = 0; m < 3; ++m)
+            wiringDiagram(&p, QRectF(10 + 250 * m, 284, 244, 274), m, top, bot, QString::fromLatin1(tt[m]), QString::fromLatin1(ss[m]), 1, m == cp);
+        return pm;
+    }
     QString plateHtml() const override {
+        const int cm = columnMode();
         return QStringLiteral(
             "<h3>Charge inductive reglable (noyau plongeur)</h3>"
-            "<table border='1' cellspacing='0' cellpadding='4'><tr><th colspan='2'>PAR BOBINAGE (colonne de 2 enroulements)</th></tr>"
-            "<tr><td><b>Montage PARALLELE</b></td><td>L max = 0,214 H &nbsp; L min = 0,019 H<br>I permanent = 13 A &nbsp; I max interm. = 21,7 A<br>R cuivre = 0,46 ohm</td></tr>"
-            "<tr><td><b>Montage SERIE</b></td><td>L max = 0,856 H &nbsp; L min = 0,076 H<br>I permanent = 6,5 A &nbsp; I max interm. = 10,8 A<br>R cuivre = 1,84 ohm</td></tr></table>"
-            "<p><b>Par colonne</b> (bornes E1 S1 / E2 S2, E3 S3 / E4 S4, E5 S5 / E6 S6)</p>"
-            "<table border='1' cellspacing='0' cellpadding='4'>"
-            "<tr><td>SERIE</td><td>barrettes S1 - E2, S3 - E4, S5 - E6 ; entrees E1 E3 E5, sorties S2 S4 S6</td></tr>"
-            "<tr><td>PARALLELE</td><td>barrettes E1 - E2 et S1 - S2 (idem colonnes 2 et 3)</td></tr></table>"
-            "<p><b>Entre colonnes</b></p>"
-            "<table border='1' cellspacing='0' cellpadding='4'>"
-            "<tr><td>ETOILE</td><td>S6 - S2 - S4 ensemble ; alimentation E1 E3 E5 (douilles TRIPHASE)</td></tr>"
-            "<tr><td>TRIANGLE</td><td>S6 - E1, S2 - E3, S4 - E5 ; alimentation TRIPHASE</td></tr>"
-            "<tr><td>MONO</td><td>S6 - S2 - S4 ensemble et E1 - E3 - E5 ensemble ; alimentation MONOPHASE (PH = E1, N = S2)</td></tr></table>"
-            "<p>Volant : <b>%1 %</b> &nbsp; soit L = %2 H par enroulement (%3 H en serie).</p>")
-            .arg(fmt(params[0].value, 0)).arg(fmt(L1(), 3)).arg(fmt(4 * L1(), 3));
+            "<p>Chaque colonne porte 2 bobinages : E1-S1 et E2-S2, E3-S3 et E4-S4, E5-S5 et E6-S6 (douilles noires). "
+            "On les met d'abord en SERIE ou en PARALLELE, puis on couple les 3 colonnes sur les douilles vertes "
+            "(reliees en interne aux douilles noires de meme nom).</p>"
+            "<p>Volant : <b>%1 %</b> &nbsp;|&nbsp; L = <b>%2 H</b> par bobinage, soit %3 H en serie et %2 H en parallele "
+            "&nbsp;|&nbsp; colonnes : <b>%4</b> &nbsp;|&nbsp; couplage : <b>%5</b> &nbsp;|&nbsp; courant max : %6 A par bobinage</p>")
+            .arg(fmt(params[0].value, 0)).arg(fmt(L1(), 3)).arg(fmt(4 * L1(), 3))
+            .arg(cm == 0 ? QStringLiteral("SERIE") : cm == 1 ? QStringLiteral("PARALLELE") : QStringLiteral("non pontees"))
+            .arg(Cart::couplingName(coupling())).arg(fmt(imax, 2));
     }
 protected:
-    bool onDial(QPointF p) const { return QLineF(p, dialC()).length() <= 66; }
+    bool onDial(QPointF p) const { return QLineF(p, dialC()).length() <= 54; }
     void turn(QPointF p) {
         const QPointF d = p - dialC();
         const double a = qBound(-150.0, qRadiansToDegrees(std::atan2(d.x(), -d.y())), 150.0);
@@ -2017,7 +2528,7 @@ protected:
     void hoverMoveEvent(QGraphicsSceneHoverEvent *ev) override {
         const bool d = onDial(ev->pos());
         setToolTip(d ? QStringLiteral("Volant : molette de la souris ou glisser pour regler l'inductance.")
-                     : QStringLiteral("Double-clic : plaque signaletique et couplages."));
+                     : QStringLiteral("Double-clic : plaques signaletiques et dessins des couplages."));
         setCursor(d ? Qt::PointingHandCursor : Qt::ArrowCursor);
     }
 public:
@@ -2284,6 +2795,9 @@ bool BenchWindow::recompute()
     int nn = std::max(0, nets - 1), ns = (int)src.size(), D = nn + ns;
     BenchSolution sol;
     sol.all = all;
+    sol.el = el;
+    sol.src = src;
+    for (BenchModule *m : m_modules) m->links(sol.links);
 
     // resolution (MNA) en alternatif (phaseurs, 50 Hz) puis en continu (bobines = resistance, condensateurs = ouverts)
     auto solveSys = [&](bool dc, std::vector<bcplx> &out, std::vector<bcplx> *xs = nullptr) -> bool {
@@ -2473,7 +2987,9 @@ BenchWindow::BenchWindow(QWidget *parent) : QMainWindow(parent)
         m_label->setText(QStringLiteral("Glisser d'une douille a une autre = fil. Clic droit sur un fil = le retirer. "
                                         "Double-clic sur un module = reglages. Molette = reglage principal. "
                                         "Pupitre : cliquer sur le sectionneur, les boutons et les commutateurs ; "
-                                        "tourner les molettes a la molette de la souris ou en les faisant glisser."));
+                                        "tourner les molettes a la molette de la souris ou en les faisant glisser. "
+                                        "Pince wattmetre : cliquer sur HOLD, 1F/3F, Hz, l'afficheur (W, VA, var, PF) et la gachette (sens). "
+                                        "Charges : cliquer sur les commutateurs, double-clic = plaques et dessins des couplages."));
     });
 
     m_scene->onConnect = [this](BenchSocket *a, BenchSocket *b) {

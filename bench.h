@@ -7,6 +7,7 @@
 #include <QGraphicsView>
 #include <QGraphicsItem>
 #include <QColor>
+#include <QPixmap>
 #include <functional>
 #include <complex>
 #include <vector>
@@ -68,6 +69,9 @@ struct BenchSolution {
         return (s->net >= 0 && s->net < (int)vdc.size()) ? vdc[s->net] : 0.0;
     }
     std::function<double(const BenchSocket *, const BenchSocket *)> rdc;   // resistance continue entre 2 douilles (sources court-circuitees)
+    std::vector<BenchElem> el;                         // elements et sources du calcul (sens des courants)
+    std::vector<BenchSrc> src;
+    std::vector<std::pair<BenchSocket *, BenchSocket *>> links;   // liaisons internes des appareils
     std::vector<bcplx> iin;                            // courant entrant dans chaque douille (depuis le fil)
     std::vector<double> iindc;
     bcplx iinAt(const BenchSocket *s) const {
@@ -105,6 +109,7 @@ public:
     virtual void post(const BenchSolution &) {}
     virtual void paintExtra(QPainter *) {}
     virtual QString plateHtml() const { return QString(); }   // plaque signaletique (double-clic)
+    virtual QPixmap platePixmap() const { return QPixmap(); } // dessin de la plaque (couplages), au-dessus du texte
     virtual bool isSupply() const { return false; }
     virtual bool hasLinks() const { return false; }
     virtual bool canClamp() const { return false; }

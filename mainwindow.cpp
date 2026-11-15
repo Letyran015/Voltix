@@ -156,7 +156,7 @@ MainWindow::MainWindow(QWidget *parent)
     fo->addAction("Folio &suivant", QKeySequence("Ctrl+PgDown"), this,
                   [this] { m_view->setFolio(m_view->currentFolio() + 1); });
     fo->addSeparator();
-    fo->addAction("&Cartouche et format de feuille…", this, [this] { editProject(); });
+    fo->addAction("&Cadre, cartouche et format de feuille…", this, [this] { editProject(); });
 
     // Menu Affichage : module, bibliothèque, accueil
     QMenu *vm = menuBar()->addMenu("&Affichage");
@@ -310,8 +310,11 @@ void MainWindow::renameFolio(int i)
 void MainWindow::editProject()
 {
     ProjectDialog dlg(m_view->project(), this);
-    if (dlg.exec() == QDialog::Accepted)
-        m_view->setProject(dlg.info());
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+    m_view->setProject(dlg.info());
+    while (m_view->folioCount() < dlg.foliosWanted())      // modèle « 2 folios »
+        m_view->addFolio();
 }
 
 void MainWindow::exportPdf()

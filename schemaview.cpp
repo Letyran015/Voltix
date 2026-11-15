@@ -145,7 +145,7 @@ void SchemaView::wheelEvent(QWheelEvent *e)
 
 void SchemaView::zoomFit()
 {
-    const QSizeF sz = SheetItem::paperSize(m_pi.paper);
+    const QSizeF sz = SheetItem::paperSize(m_pi);
     fitInView(QRectF(QPointF(0, 0), sz).adjusted(-30, -30, 30, 30), Qt::KeepAspectRatio);
 }
 
@@ -261,7 +261,7 @@ void SchemaView::renameFolio(int i, const QString &title)
 
 void SchemaView::setProject(const ProjectInfo &pi)
 {
-    const bool paperChanged = pi.paper != m_pi.paper;
+    const bool paperChanged = pi.paper != m_pi.paper || pi.portrait != m_pi.portrait;
     m_pi = pi;
     m_dirty = true;
     applySheet(m_folio);
@@ -529,7 +529,7 @@ void SchemaView::updateCrossRefs()
         }
     }
     auto where = [this](const Rec &r) {
-        return QString("( %1 - %2 )").arg(r.folio + 1, 2, 10, QChar('0')).arg(SheetItem::columnOf(m_pi.paper, r.x));
+        return QString("( %1 - %2 )").arg(r.folio + 1, 2, 10, QChar('0')).arg(SheetItem::columnOf(m_pi, r.x));
     };
     auto isMaster = [](const QString &role) { return role == "coil" || role == "thermal"; };
 
@@ -620,6 +620,9 @@ void SchemaView::clearAll()
     m_pi.address = old.address;
     m_pi.author = old.author;
     m_pi.paper = old.paper;
+    m_pi.portrait = old.portrait;
+    m_pi.frame = old.frame;
+    m_pi.logo = old.logo;
 
     m_folios.clear();
     Folio f;
@@ -648,6 +651,10 @@ bool SchemaView::saveToFile(const QString &path)
 
     QJsonObject pj;
     pj["paper"] = m_pi.paper;
+    pj["portrait"] = m_pi.portrait;
+    pj["frame"] = m_pi.frame;
+    if (!m_pi.logo.isEmpty())
+        pj["logo"] = QString::fromLatin1(m_pi.logo.toBase64());
     pj["company"] = m_pi.company;
     pj["address"] = m_pi.address;
     pj["title"] = m_pi.title;
@@ -701,6 +708,11 @@ bool SchemaView::loadFromFile(const QString &path)
     if (root.contains("folios")) {                          // format 2
         const QJsonObject pj = root["project"].toObject();
         pi.paper = pj["paper"].toString("A4");
+        if (pi.paper != "A3" && pi.paper != "A2")
+            pi.paper = "A4";
+        pi.portrait = pj["portrait"].toBool(false);
+        pi.frame = qBound(0, pj["frame"].toInt(FrameCartouche), 4);
+        pi.logo = QByteArray::fromBase64(pj["logo"].toString().toLatin1());
         pi.company = pj["company"].toString();
         pi.address = pj["address"].toString();
         pi.title = pj["title"].toString();
@@ -755,8 +767,8 @@ bool SchemaView::exportPdf(const QString &path)
     m_pi.modified = QDate::currentDate().toString(Qt::ISODate);
 
     QPdfWriter w(path);
-    w.setPageSize(QPageSize(m_pi.paper == "A3" ? QPageSize::A3 : QPageSize::A4));
-    w.setPageOrientation(QPageLayout::Landscape);
+    w.setPageSize(QPageSize(m_pi.paper == "A2" ? QPageSize::A2 : m_pi.paper == "A3" ? QPageSize::A3 : QPageSize::A4));
+    w.setPageOrientation(m_pi.portrait ? QPageLayout::Portrait : QPageLayout::Landscape);
     w.setPageMargins(QMarginsF(0, 0, 0, 0));
     w.setResolution(300);
     w.setTitle(m_pi.title.isEmpty() ? QString("Schéma Voltix") : m_pi.title);
@@ -769,7 +781,7 @@ bool SchemaView::exportPdf(const QString &path)
 
     m_exporting = true;
     SymbolItem::hidePins = true;
-    const QRectF source(QPointF(0, 0), SheetItem::paperSize(m_pi.paper));
+    const QRectF source(QPointF(0, 0), SheetItem::paperSize(m_pi));
     for (int i = 0; i < m_folios.size(); ++i) {
         if (i > 0)
             w.newPage();
